@@ -228,13 +228,18 @@ fn parse_metadata(
         if word.is_empty() {
             continue;
         }
+        // The cursor walks BYTE offsets (cheap find), but the frontend slices
+        // JS strings, which index by UTF-16 code units — convert at the edge
+        // so highlights stay exact on smart quotes/em-dashes/accents.
         let (char_start, char_len) = match source[*char_cursor..].find(word) {
             Some(rel) => {
-                let start = *char_cursor + rel;
-                *char_cursor = start + word.len();
-                (start, word.len())
+                let byte_start = *char_cursor + rel;
+                *char_cursor = byte_start + word.len();
+                let utf16_start = source[..byte_start].encode_utf16().count();
+                let utf16_len = word.encode_utf16().count();
+                (utf16_start, utf16_len)
             }
-            None => (*char_cursor, 0), // unmatched: frontend ignores zero-length
+            None => (0, 0), // unmatched: frontend ignores zero-length
         };
         out.push(WordBoundary {
             offset_ms: (offset_ticks / 10_000) as u32,

@@ -561,6 +561,7 @@ export const engine = {
     }
     gen++;
     cancelCurrentAudio();
+    reportPlaying(false); // rebinding away from a playing item: tray must not stay "playing"
     prefetch.clear();
     sentenceCache.clear();
     doc = document;

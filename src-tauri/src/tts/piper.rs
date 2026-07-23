@@ -43,6 +43,7 @@ pub struct PiperModel {
     pub name: String,
     pub quality: String,
     pub locale: String,
+    #[serde(rename = "sizeMB")] // camelCase would yield "sizeMb" ≠ ipc.ts
     pub size_mb: u32,
     pub installed: bool,
 }
@@ -51,6 +52,7 @@ pub struct PiperModel {
 #[serde(rename_all = "camelCase")]
 pub struct PiperStatus {
     pub binary_installed: bool,
+    #[serde(rename = "binarySizeMB")] // camelCase would yield "binarySizeMb" ≠ ipc.ts
     pub binary_size_mb: u32,
     pub models: Vec<PiperModel>,
 }
@@ -269,8 +271,16 @@ pub async fn piper_status() -> Result<PiperStatus> {
     })
 }
 
+// Downloads run for minutes — they must never sit on a Tokio worker thread,
+// or concurrent IPC commands degrade for the whole download.
 #[tauri::command]
 pub async fn piper_install_binary(app: AppHandle) -> Result<()> {
+    tauri::async_runtime::spawn_blocking(move || install_binary_blocking(&app))
+        .await
+        .map_err(|e| AppError::wrap("Install task", e))?
+}
+
+fn install_binary_blocking(app: &AppHandle) -> Result<()> {
     if piper_exe().exists() {
         return Ok(());
     }
@@ -278,7 +288,7 @@ pub async fn piper_install_binary(app: AppHandle) -> Result<()> {
     ensure_dir(&voices)?;
     let zip_path = voices.join("piper_windows_amd64.zip");
     crate::downloads::download_with_progress(
-        &app,
+        app,
         "piper-binary",
         "Piper engine",
         BINARY_URL,
@@ -292,7 +302,13 @@ pub async fn piper_install_binary(app: AppHandle) -> Result<()> {
 
 #[tauri::command]
 pub async fn piper_install_model(app: AppHandle, model_id: String) -> Result<()> {
-    if !catalog_has(&model_id) {
+    tauri::async_runtime::spawn_blocking(move || install_model_blocking(&app, &model_id))
+        .await
+        .map_err(|e| AppError::wrap("Install task", e))?
+}
+
+fn install_model_blocking(app: &AppHandle, model_id: &str) -> Result<()> {
+    if !catalog_has(model_id) {
         return Err(AppError::msg("Unknown voice"));
     }
     let label = CATALOG
@@ -300,23 +316,23 @@ pub async fn piper_install_model(app: AppHandle, model_id: String) -> Result<()>
         .find(|(id, ..)| *id == model_id)
         .map(|(_, name, _)| *name)
         .unwrap_or("Local voice");
-    let onnx_url = model_url(&model_id).ok_or_else(|| AppError::msg("Unknown voice"))?;
-    let cfg_url = config_url(&model_id).ok_or_else(|| AppError::msg("Unknown voice"))?;
+    let onnx_url = model_url(model_id).ok_or_else(|| AppError::msg("Unknown voice"))?;
+    let cfg_url = config_url(model_id).ok_or_else(|| AppError::msg("Unknown voice"))?;
 
     ensure_dir(&voices_dir())?;
     crate::downloads::download_with_progress(
-        &app,
+        app,
         &format!("piper-model-{model_id}"),
         label,
         &onnx_url,
-        &model_path(&model_id),
+        &model_path(model_id),
     )?;
     crate::downloads::download_with_progress(
-        &app,
+        app,
         &format!("piper-model-{model_id}-cfg"),
         label,
         &cfg_url,
-        &config_path(&model_id),
+        &config_path(model_id),
     )?;
     Ok(())
 }

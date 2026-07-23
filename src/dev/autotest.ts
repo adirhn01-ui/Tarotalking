@@ -218,14 +218,19 @@ export async function runAutotest(): Promise<void> {
       );
     });
   } finally {
-    // Teardown: remove everything the harness created.
-    engine.unload();
-    for (const id of createdItemIds) {
-      try {
-        await ipc.deleteItem(id);
-        removeItem(id);
-      } catch {
-        /* best effort */
+    // Teardown: remove everything the harness created — unless keep mode
+    // (TAROTALKING_AUTOTEST=2) wants the fixture left open for visual passes.
+    if (info.autotestKeep) {
+      if (epubId) navigate({ view: "reader", itemId: epubId });
+    } else {
+      engine.unload();
+      for (const id of createdItemIds) {
+        try {
+          await ipc.deleteItem(id);
+          removeItem(id);
+        } catch {
+          /* best effort */
+        }
       }
     }
     await sleep(600); // let the library save flush

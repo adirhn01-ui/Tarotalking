@@ -175,6 +175,10 @@ function sortItems(items: LibraryItem[]): LibraryItem[] {
 interface ModalHandle {
   backdrop: HTMLElement;
   close: () => void;
+  /** True once ANY close path ran (Esc, backdrop, X, or programmatic).
+   *  Async work started inside the modal must re-check this after awaiting —
+   *  a dismissed dialog may not navigate or mutate on late resolution. */
+  isClosed: () => boolean;
 }
 
 function makeModal(innerHtml: string): ModalHandle {
@@ -202,7 +206,7 @@ function makeModal(innerHtml: string): ModalHandle {
   backdrop.addEventListener("pointerdown", (e) => {
     if (e.target === backdrop) close();
   });
-  return { backdrop, close };
+  return { backdrop, close, isClosed: () => closed };
 }
 
 function modalHeader(title: string): string {
@@ -305,7 +309,7 @@ async function pickAndImportFiles(): Promise<void> {
 }
 
 function openPasteModal(): void {
-  const { backdrop, close } = makeModal(
+  const { backdrop, close, isClosed } = makeModal(
     `<div class="modal lib-modal" role="dialog" aria-modal="true">
       ${modalHeader("Paste text")}
       <div class="modal__body">
@@ -344,6 +348,7 @@ function openPasteModal(): void {
     busy = true;
     const { importPastedText } = await import("../core/import");
     const id = await importPastedText(titleInput.value.trim() || null, textArea.value);
+    if (isClosed()) return; // dismissed (Esc/backdrop) while importing
     if (id) {
       close();
       navigate({ view: "reader", itemId: id });
@@ -357,7 +362,7 @@ function openPasteModal(): void {
 }
 
 function openWebModal(): void {
-  const { backdrop, close } = makeModal(
+  const { backdrop, close, isClosed } = makeModal(
     `<div class="modal lib-modal" role="dialog" aria-modal="true">
       ${modalHeader("Add from web")}
       <div class="modal__body">
@@ -380,11 +385,6 @@ function openWebModal(): void {
   const errEl = backdrop.querySelector<HTMLElement>("[data-error]")!;
 
   let busy = false;
-  let cancelled = false;
-  const doClose = (): void => {
-    cancelled = true;
-    close();
-  };
   const submit = async (): Promise<void> => {
     if (busy) return;
     const url = input.value.trim();
@@ -401,7 +401,7 @@ function openWebModal(): void {
 
     const { importUrl } = await import("../core/import");
     const id = await importUrl(url);
-    if (cancelled) return;
+    if (isClosed()) return; // dismissed (Esc/backdrop/X) while fetching
 
     if (id) {
       close();
@@ -417,7 +417,7 @@ function openWebModal(): void {
     errEl.hidden = false;
     input.focus();
   };
-  backdrop.querySelectorAll("[data-close]").forEach((b) => b.addEventListener("click", doClose));
+  backdrop.querySelectorAll("[data-close]").forEach((b) => b.addEventListener("click", close));
   goBtn.addEventListener("click", () => void submit());
   input.addEventListener("keydown", (e) => {
     if (e.key === "Enter") {

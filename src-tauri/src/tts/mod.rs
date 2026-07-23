@@ -23,6 +23,7 @@ pub struct WordBoundary {
 #[serde(rename_all = "camelCase")]
 pub struct SynthResult {
     pub path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub boundaries: Option<Vec<WordBoundary>>,
 }
 

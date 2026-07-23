@@ -87,32 +87,46 @@ pub fn synth_via_cache(provider: &str, voice_id: &str, text: &str) -> Result<Syn
         }
     }
 
-    // Miss: synthesize into the cache slot.
+    // Miss: synthesize into a STAGING file and promote on success only. A
+    // provider killed mid-write (piper timeout, dropped socket) must never
+    // leave a truncated file at the real cache path — the hit check only
+    // tests non-emptiness, so a partial file there would become a permanent
+    // false hit serving corrupt audio for this sentence forever.
     ensure_dir(&dir)?;
-    let boundaries = match provider {
+    let staging = dir.join(format!("{key}.part.{ext}"));
+    let synth_result: Result<Option<Vec<WordBoundary>>> = (|| match provider {
         "edge" => {
-            let bounds = crate::tts::edge::synth(voice_id, text, &audio_path)?;
-            if bounds.is_empty() {
-                None
-            } else {
-                let _ = write_boundaries(&audio_path, &bounds);
-                Some(bounds)
-            }
+            let bounds = crate::tts::edge::synth(voice_id, text, &staging)?;
+            Ok(if bounds.is_empty() { None } else { Some(bounds) })
         }
         "piper" => {
-            crate::tts::piper::synth(voice_id, text, &audio_path)?;
-            None
+            crate::tts::piper::synth(voice_id, text, &staging)?;
+            Ok(None)
         }
         "system" => {
-            crate::tts::system::synth(voice_id, text, &audio_path)?;
-            None
+            crate::tts::system::synth(voice_id, text, &staging)?;
+            Ok(None)
         }
         "eleven" => {
-            crate::tts::eleven::synth(voice_id, text, &audio_path)?;
-            None
+            crate::tts::eleven::synth(voice_id, text, &staging)?;
+            Ok(None)
         }
-        _ => return Err(AppError::msg("Unknown voice provider")),
+        _ => Err(AppError::msg("Unknown voice provider")),
+    })();
+    let boundaries = match synth_result {
+        Ok(b) => b,
+        Err(e) => {
+            let _ = std::fs::remove_file(&staging);
+            return Err(e);
+        }
     };
+    if audio_path.exists() {
+        let _ = std::fs::remove_file(&audio_path);
+    }
+    std::fs::rename(&staging, &audio_path)?;
+    if let Some(bounds) = &boundaries {
+        let _ = write_boundaries(&audio_path, bounds);
+    }
 
     // Keep the cache under the configured cap (never touching fresh files).
     let cap_mb = read_field_u64("cacheLimitMB").unwrap_or(DEFAULT_CAP_MB);
@@ -145,6 +159,7 @@ fn prune(max_bytes: u64) -> Result<()> {
     let mut total: u64 = 0;
     // Audio files only; each carries its sidecar as a unit when evicted.
     let mut audio: Vec<(PathBuf, u64, SystemTime)> = Vec::new();
+    let mut sidecars: Vec<(PathBuf, u64)> = Vec::new();
     for entry in read.flatten() {
         let meta = match entry.metadata() {
             Ok(m) => m,
@@ -156,10 +171,29 @@ fn prune(max_bytes: u64) -> Result<()> {
         total += meta.len();
         let path = entry.path();
         if is_sidecar(&path) {
+            sidecars.push((path, meta.len()));
             continue;
         }
         let mtime = meta.modified().unwrap_or(now);
         audio.push((path, meta.len(), mtime));
+    }
+
+    // Orphan sidecars (audio deleted, sidecar survived an interruption) are
+    // never eviction candidates below, so sweep them here or the cap can
+    // become permanently unreachable.
+    let audio_stems: std::collections::HashSet<String> = audio
+        .iter()
+        .filter_map(|(p, ..)| p.file_stem().and_then(|s| s.to_str()).map(str::to_string))
+        .collect();
+    for (path, size) in &sidecars {
+        let owner = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .and_then(|n| n.strip_suffix(".bounds.json"));
+        let orphaned = owner.is_none_or(|stem| !audio_stems.contains(stem));
+        if orphaned && std::fs::remove_file(path).is_ok() {
+            total = total.saturating_sub(*size);
+        }
     }
 
     if total <= max_bytes {

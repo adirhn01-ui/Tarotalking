@@ -79,6 +79,8 @@ fn quit_app(app: tauri::AppHandle) {
 #[serde(rename_all = "camelCase")]
 struct DebugInfo {
     autotest: bool,
+    /// "2" keeps the harness's imported items + final view (visual passes).
+    autotest_keep: bool,
     fixtures_dir: String,
 }
 
@@ -90,8 +92,10 @@ fn debug_info() -> DebugInfo {
         .and_then(|d| d.parent().map(|p| p.join("fixtures")))
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_default();
+    let mode = std::env::var("TAROTALKING_AUTOTEST").unwrap_or_default();
     DebugInfo {
-        autotest: std::env::var("TAROTALKING_AUTOTEST").is_ok_and(|v| v == "1"),
+        autotest: mode == "1" || mode == "2",
+        autotest_keep: mode == "2",
         fixtures_dir: fixtures,
     }
 }

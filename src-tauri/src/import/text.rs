@@ -7,7 +7,10 @@ const MAX_BYTES: u64 = 20 * 1024 * 1024;
 
 #[tauri::command]
 pub async fn read_text_file(path: String) -> Result<String> {
-    read_text_inner(&path)
+    // Up to 20 MB of sync I/O — keep it off the async worker threads.
+    tauri::async_runtime::spawn_blocking(move || read_text_inner(&path))
+        .await
+        .map_err(|e| AppError::wrap("Read task", e))?
 }
 
 fn read_text_inner(path: &str) -> Result<String> {

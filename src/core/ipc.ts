@@ -76,6 +76,7 @@ export interface CacheStats {
 
 export interface DebugInfo {
   autotest: boolean;
+  autotestKeep: boolean;
   fixturesDir: string;
 }
 
