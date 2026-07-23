@@ -76,6 +76,7 @@ export interface CacheStats {
 
 export interface DebugInfo {
   autotest: boolean;
+  fixturesDir: string;
 }
 
 /* ================= commands ================= */
@@ -146,7 +147,11 @@ export const ipc = {
     call("set_playback_state", { playing, title }),
   /** Drain the queued open-with paths (single-instance + startup). */
   takePendingOpenPaths: (): Promise<string[]> => call("take_pending_open_paths"),
+  /** Graceful quit (tray) — call after flushing state. */
+  quitApp: (): Promise<void> => call("quit_app"),
   debugInfo: (): Promise<DebugInfo> => call("debug_info"),
+  /** Dev E2E only: persist the autotest report for the E2E runner. */
+  autotestReport: (report: unknown): Promise<void> => call("autotest_report", { report }),
 };
 
 /* ================= events (Rust → frontend) ================= */

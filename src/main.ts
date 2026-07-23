@@ -93,6 +93,26 @@ void (async () => {
     if (last) navigate({ view: "reader", itemId: last.id });
   }
 
+  // Tray actions: transport without the window, graceful quit with a flush.
+  const { onTrayAction } = await import("./core/ipc");
+  void onTrayAction((action) => {
+    void (async () => {
+      const { engine } = await import("./player/engine");
+      if (action === "play-pause") engine.toggle();
+      else if (action === "next") engine.nextParagraph();
+      else if (action === "prev") engine.prevParagraph();
+      else if (action === "quit") {
+        const [{ flushLibrary }, { ipc: ipcMod }] = await Promise.all([
+          import("./core/library"),
+          import("./core/ipc"),
+        ]);
+        engine.stop();
+        await flushLibrary();
+        await ipcMod.quitApp().catch(() => {});
+      }
+    })();
+  });
+
   // OS open-with routing + second-instance opens: drain the queued paths.
   const { ipc, onOpenPath } = await import("./core/ipc");
   let openChain: Promise<void> = Promise.resolve();

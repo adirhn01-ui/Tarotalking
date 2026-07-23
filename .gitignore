@@ -4,5 +4,6 @@ src-tauri/target/
 src-tauri/gen/
 src-tauri/icon-src-1024.png
 release/
+fixtures/
 *.log
 .DS_Store

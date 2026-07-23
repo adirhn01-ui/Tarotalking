@@ -69,16 +69,40 @@ fn show_in_folder(path: String) -> Result<()> {
         .map_err(|e| error::AppError::wrap("Could not open folder", e))
 }
 
+/// Graceful quit from the tray: the frontend flushes state, then calls this.
+#[tauri::command]
+fn quit_app(app: tauri::AppHandle) {
+    app.exit(0);
+}
+
 #[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 struct DebugInfo {
     autotest: bool,
+    fixtures_dir: String,
 }
 
 #[tauri::command]
 fn debug_info() -> DebugInfo {
+    // In dev the process cwd is src-tauri; fixtures live in the repo root.
+    let fixtures = std::env::current_dir()
+        .ok()
+        .and_then(|d| d.parent().map(|p| p.join("fixtures")))
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default();
     DebugInfo {
         autotest: std::env::var("TAROTALKING_AUTOTEST").is_ok_and(|v| v == "1"),
+        fixtures_dir: fixtures,
     }
+}
+
+/// Dev E2E: the in-app harness writes its result report through this command;
+/// the E2E runner polls the file. Inert unless the harness runs.
+#[tauri::command]
+fn autotest_report(report: serde_json::Value) -> Result<()> {
+    let path = std::env::temp_dir().join("tarotalking-autotest-report.json");
+    let bytes = serde_json::to_vec_pretty(&report)?;
+    paths::atomic_write(&path, &bytes)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -128,7 +152,9 @@ pub fn run() {
             take_pending_open_paths,
             set_playback_state,
             show_in_folder,
+            quit_app,
             debug_info,
+            autotest_report,
             // settings
             settings::settings_load,
             settings::settings_save,
