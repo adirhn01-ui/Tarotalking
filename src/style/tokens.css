@@ -1,0 +1,136 @@
+/* ============================================================
+   Tarotalking design tokens
+   Neutral grayscale, one violet accent, dark-first.
+   Sibling of Taroting (indigo #6c7cff) — same system, own hue.
+   ============================================================ */
+
+:root {
+  /* geometry */
+  --radius-s: 8px;
+  --radius-m: 10px;
+  --radius-l: 14px;
+  --radius-full: 999px;
+
+  /* spacing (4px grid) */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 20px;
+  --sp-6: 24px;
+  --sp-8: 32px;
+  --sp-10: 40px;
+  --sp-12: 48px;
+
+  /* typography (app chrome — the reader surface has its own scale) */
+  --font-ui: "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, sans-serif;
+  --font-mono: "Cascadia Mono", Consolas, "Courier New", monospace;
+  --font-serif: Georgia, "Times New Roman", serif;
+  --fs-11: 11px;
+  --fs-12: 12px;
+  --fs-13: 13px;
+  --fs-14: 14px;
+  --fs-16: 16px;
+  --fs-20: 20px;
+  --fs-24: 24px;
+  --fs-32: 32px;
+
+  /* motion — functional micro-transitions only */
+  --dur: 120ms;
+  --ease: cubic-bezier(0.2, 0.6, 0.2, 1);
+
+  /* z-index scale — ONE explicit ladder for every stacking layer in the app.
+   * Ascending = closer to the viewer. Anything that stacks MUST pick a token
+   * here (no ad-hoc z-index) so the order below stays authoritative.
+   *   reader content ............ 0     (the page itself; highlight is inline)
+   *   view chrome ............... 300   (reader top bar, player bar, TOC panel)
+   *   app overlay ............... 400   (drag-drop overlay, focus dimmer)
+   *   context menu .............. 1000
+   *   modal backdrop ............ 1100
+   *   toast ..................... 1200  (always on top) */
+  --z-chrome: 300;
+  --z-overlay: 400;
+  --z-menu: 1000;
+  --z-modal: 1100;
+  --z-toast: 1200;
+}
+
+html[data-theme="dark"] {
+  color-scheme: dark;
+
+  --bg-app: #111113;
+  --bg-panel: #17171a;
+  --bg-raised: #1d1d21;
+  --bg-hover: #242429;
+  --bg-active: #2b2b31;
+  --bg-input: #1a1a1e;
+
+  --border: #26262c;
+  --border-strong: #35353d;
+
+  --text-1: #ececf1;
+  --text-2: #a4a4af;
+  --text-3: #6e6e79;
+
+  --accent: #8a7cff;
+  --accent-strong: #a094ff;
+  --accent-dim: rgba(138, 124, 255, 0.15);
+  --on-accent: #ffffff;
+
+  --danger: #ff5d5d;
+  --danger-dim: rgba(255, 93, 93, 0.12);
+  --ok: #45c98c;
+  --warn: #f0b455;
+
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.5);
+  --shadow-2: 0 4px 16px rgba(0, 0, 0, 0.45);
+  --shadow-3: 0 16px 48px rgba(0, 0, 0, 0.5);
+
+  /* reader page surface (overridden by reader themes on .reader-surface) */
+  --page-bg: #17171a;
+  --page-text: #dcdce2;
+  --page-text-soft: #a4a4af;
+  --page-rule: #2b2b31;
+  /* the sentence being spoken */
+  --speak-bg: rgba(138, 124, 255, 0.18);
+  --speak-word: rgba(138, 124, 255, 0.42);
+}
+
+html[data-theme="light"] {
+  color-scheme: light;
+
+  --bg-app: #f6f6f8;
+  --bg-panel: #ffffff;
+  --bg-raised: #ffffff;
+  --bg-hover: #efeff2;
+  --bg-active: #e7e7ec;
+  --bg-input: #f2f2f5;
+
+  --border: #e4e4e9;
+  --border-strong: #cfcfd8;
+
+  --text-1: #1b1b20;
+  --text-2: #5b5b66;
+  --text-3: #8f8f9b;
+
+  --accent: #6f5ce8;
+  --accent-strong: #5a48d1;
+  --accent-dim: rgba(111, 92, 232, 0.12);
+  --on-accent: #ffffff;
+
+  --danger: #e5484d;
+  --danger-dim: rgba(229, 72, 77, 0.1);
+  --ok: #23985f;
+  --warn: #c98a1b;
+
+  --shadow-1: 0 1px 2px rgba(20, 20, 30, 0.08);
+  --shadow-2: 0 4px 16px rgba(20, 20, 30, 0.1);
+  --shadow-3: 0 16px 48px rgba(20, 20, 30, 0.14);
+
+  --page-bg: #ffffff;
+  --page-text: #26262c;
+  --page-text-soft: #5b5b66;
+  --page-rule: #e7e7ec;
+  --speak-bg: rgba(111, 92, 232, 0.14);
+  --speak-word: rgba(111, 92, 232, 0.34);
+}

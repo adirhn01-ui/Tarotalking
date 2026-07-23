@@ -1,0 +1,56 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Tarotalking",
+  "version": "0.1.0",
+  "identifier": "com.tarotalking.app",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Tarotalking",
+        "width": 1240,
+        "height": 820,
+        "minWidth": 940,
+        "minHeight": 620,
+        "center": true,
+        "backgroundColor": "#111113",
+        "dragDropEnabled": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; media-src 'self' asset: http://asset.localhost blob:; img-src 'self' asset: http://asset.localhost data:; connect-src ipc: http://ipc.localhost asset: http://asset.localhost",
+      "devCsp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; media-src 'self' asset: http://asset.localhost blob:; img-src 'self' asset: http://asset.localhost data:; connect-src ipc: http://ipc.localhost asset: http://asset.localhost ws://localhost:1420",
+      "assetProtocol": {
+        "enable": true,
+        "scope": [
+          "$HOME/AppData/Roaming/Tarotalking/**",
+          "$HOME/AppData/Local/Tarotalking/**"
+        ]
+      }
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "icon": ["icons/icon.ico"],
+    "fileAssociations": [
+      {
+        "ext": ["epub"],
+        "name": "EPUB e-book",
+        "description": "E-book readable in Tarotalking",
+        "role": "Viewer"
+      }
+    ],
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser"
+      }
+    }
+  }
+}
