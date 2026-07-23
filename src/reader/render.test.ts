@@ -4,7 +4,9 @@ import {
   blockTag,
   buildCharIndex,
   chapterWordCounts,
+  filterByLabel,
   pctForPosition,
+  sentenceHitForOffset,
   sentenceIndexForOffset,
   splitWordParts,
   topmostBlockIndex,
@@ -140,6 +142,78 @@ describe("sentenceIndexForOffset", () => {
   it("returns 0 for text with no sentences", () => {
     expect(sentenceIndexForOffset("", 0)).toBe(0);
     expect(sentenceIndexForOffset("   ", 1)).toBe(0);
+  });
+});
+
+describe("sentenceHitForOffset", () => {
+  // "Hello world. Second one." → span0 [0,12), span1 [13,24)
+  const two = "Hello world. Second one.";
+
+  it("returns the sentence and the char offset within it", () => {
+    expect(sentenceHitForOffset(two, 0)).toEqual({ sentence: 0, offset: 0 });
+    expect(sentenceHitForOffset(two, 6)).toEqual({ sentence: 0, offset: 6 });
+    expect(sentenceHitForOffset(two, 13)).toEqual({ sentence: 1, offset: 0 }); // 'S' at span1.start
+    expect(sentenceHitForOffset(two, 20)).toEqual({ sentence: 1, offset: 7 }); // 'o' of "one"
+  });
+
+  it("clamps a leading-whitespace offset to 0 within the first sentence", () => {
+    // "  Hi there." → span0 starts at 2; offset 0 is before it → clamp to 0.
+    expect(sentenceHitForOffset("  Hi there.", 0)).toEqual({ sentence: 0, offset: 0 });
+  });
+
+  it("returns sentence 0 offset 0 for text with no sentences", () => {
+    expect(sentenceHitForOffset("", 5)).toEqual({ sentence: 0, offset: 0 });
+    expect(sentenceHitForOffset("   ", 2)).toEqual({ sentence: 0, offset: 0 });
+  });
+});
+
+describe("filterByLabel", () => {
+  const items = ["Alpha", "Beta", "Gamma", "alpha beta"];
+
+  it("returns every index, uncapped, for an empty query", () => {
+    const r = filterByLabel(items, "", (s) => s);
+    expect(r.indices).toEqual([0, 1, 2, 3]);
+    expect(r.overflow).toBe(0);
+    expect(r.filtered).toBe(false);
+  });
+
+  it("matches a case-insensitive substring", () => {
+    const r = filterByLabel(items, "ALPHA", (s) => s);
+    expect(r.indices).toEqual([0, 3]);
+    expect(r.filtered).toBe(true);
+    expect(r.overflow).toBe(0);
+  });
+
+  it("ignores surrounding whitespace in the query", () => {
+    expect(filterByLabel(items, "  beta ", (s) => s).indices).toEqual([1, 3]);
+  });
+
+  it("treats a whitespace-only query as empty (no filter)", () => {
+    const r = filterByLabel(items, "   ", (s) => s);
+    expect(r.indices).toEqual([0, 1, 2, 3]);
+    expect(r.filtered).toBe(false);
+  });
+
+  it("reports no matches as an empty index list", () => {
+    const r = filterByLabel(items, "zzz", (s) => s);
+    expect(r.indices).toEqual([]);
+    expect(r.filtered).toBe(true);
+    expect(r.overflow).toBe(0);
+  });
+
+  it("caps matches at `cap` and reports the overflow", () => {
+    const many = Array.from({ length: 500 }, (_, i) => `Chapter ${i}`);
+    const r = filterByLabel(many, "chapter", (s) => s, 400);
+    expect(r.indices.length).toBe(400);
+    expect(r.indices[0]).toBe(0);
+    expect(r.indices[399]).toBe(399);
+    expect(r.overflow).toBe(100);
+    expect(r.filtered).toBe(true);
+  });
+
+  it("passes the index to the label function", () => {
+    const r = filterByLabel(["a", "b", "c"], "2", (_, i) => `row ${i}`);
+    expect(r.indices).toEqual([2]);
   });
 });
 

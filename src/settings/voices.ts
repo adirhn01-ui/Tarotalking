@@ -101,9 +101,24 @@ export function previewSampleText(name: string): string {
   return `Hi, I'm ${name}. This is how I sound in Tarotalking.`;
 }
 
+/** BYO-key cloud providers — unavailable until a key is added (so their cards
+ *  offer "Add key"), and their previews spend the user's own API credits. */
+const KEY_PROVIDER_IDS: ReadonlySet<ProviderId> = new Set<ProviderId>([
+  "eleven",
+  "openai",
+  "speechify",
+  "deepgram",
+  "cartesia",
+]);
+
+/** Whether a provider requires a BYO API key (drives the "Add key" affordance). */
+export function isKeyProvider(provider: ProviderId): boolean {
+  return KEY_PROVIDER_IDS.has(provider);
+}
+
 /** Providers whose previews spend the user's own API credits. */
 export function previewCostsCredits(provider: ProviderId): boolean {
-  return provider === "eleven" || provider === "openai";
+  return KEY_PROVIDER_IDS.has(provider);
 }
 
 /* ================= descriptions ================= */
@@ -114,6 +129,9 @@ const PROVIDER_DESC: Record<string, string> = {
   piper: "Downloadable neural voices that run fully offline on your PC.",
   eleven: "Your ElevenLabs voices via your API key.",
   openai: "OpenAI voices via your API key. Requires internet.",
+  speechify: "Speechify's Simba voices via your API key. Requires internet.",
+  deepgram: "Deepgram's Aura voices via your API key. Requires internet.",
+  cartesia: "Cartesia's Sonic voices via your API key. Requires internet.",
 };
 
 /* ================= mount ================= */
@@ -243,10 +261,9 @@ export function mountVoices(container: HTMLElement, ctx: VoicesCtx): { dispose()
     provider: TtsProvider,
     reason: string | undefined,
   ): void {
-    const addKey =
-      provider.id === "eleven" || provider.id === "openai"
-        ? `<button type="button" class="btn btn--sm btn--ghost" data-addkey>Add key</button>`
-        : "";
+    const addKey = isKeyProvider(provider.id)
+      ? `<button type="button" class="btn btn--sm btn--ghost" data-addkey>Add key</button>`
+      : "";
     slot.innerHTML = `<div class="set-voice-unavailable">
       <span class="set-voice-reason">${escapeHtml(reason ?? "Unavailable")}</span>
       ${addKey}

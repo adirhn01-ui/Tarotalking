@@ -156,10 +156,54 @@ export async function runAutotest(): Promise<void> {
       assert(voices.length > 0, "no system voices");
       const { updatePlaybackPrefs } = await import("../core/session");
       const prevVoice = (await import("../core/session")).settingsStore.get().playback.voice;
+      // Isolate synthesis from playback: a direct synth failure surfaces its
+      // real error instead of a generic status timeout.
+      const direct = await ipc.synth("system", voices[0]!.id, "Direct synth check.");
+      assert(direct.path.endsWith(".wav"), `direct synth path: ${direct.path}`);
+      // Probe transport vs demux separately: fetch() proves the asset
+      // protocol serves bytes; the audio loads prove what the media stack
+      // accepts (wav vs mp3).
+      const { convertFileSrc } = await import("@tauri-apps/api/core");
+      const wavUrl = convertFileSrc(direct.path);
+      let transport = "";
+      try {
+        const resp = await fetch(wavUrl);
+        const buf = await resp.arrayBuffer();
+        const head = new Uint8Array(buf.slice(0, 4));
+        transport = `fetch status=${resp.status} type=${resp.headers.get("content-type")} bytes=${buf.byteLength} head=${String.fromCharCode(...head)}`;
+      } catch (e) {
+        transport = `fetch THREW: ${e instanceof Error ? e.message : String(e)}`;
+      }
+      const loadAudio = (src: string): Promise<string> =>
+        new Promise((resolve) => {
+          const a = new Audio();
+          a.onerror = () => resolve(`FAILED code=${a.error?.code} msg=${a.error?.message}`);
+          a.oncanplaythrough = () => resolve("ok");
+          a.src = src;
+          window.setTimeout(() => resolve(`TIMEOUT readyState=${a.readyState}`), 6000);
+        });
+      const wavLoad = await loadAudio(wavUrl);
+      let mp3Load = "no mp3 available";
+      try {
+        const mp3 = await ipc.synth("edge", "en-US-AriaNeural", "Probe mp3 load.");
+        mp3Load = await loadAudio(convertFileSrc(mp3.path));
+      } catch (e) {
+        mp3Load = `edge synth failed: ${e instanceof Error ? e.message : String(e)}`;
+      }
+      assert(
+        wavLoad === "ok",
+        `wav=[${wavLoad}] mp3=[${mp3Load}] transport=[${transport}]`,
+      );
       updatePlaybackPrefs({ voice: { provider: "system", id: voices[0]!.id } });
       try {
         await engine.play();
-        await waitFor(() => engineState.get().status === "playing", 8000, "status playing");
+        await waitFor(
+          () => engineState.get().status === "playing" || engineState.get().status === "error",
+          8000,
+          "status playing",
+        );
+        const st = engineState.get();
+        assert(st.status === "playing", `engine error: ${st.error ?? st.status}`);
         // Advances into the text (boundary or sentence change) within a while.
         const startPos = JSON.stringify(engineState.get().pos);
         await waitFor(

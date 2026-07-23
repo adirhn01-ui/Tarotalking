@@ -15,6 +15,7 @@ import {
   downloadPct,
   formatMB,
   isHighQuality,
+  isKeyProvider,
   localeShortBadge,
   piperModelTask,
   piperTaskBase,
@@ -151,12 +152,32 @@ describe("previewSampleText", () => {
 });
 
 describe("previewCostsCredits", () => {
-  it("is true only for the paid cloud providers", () => {
+  it("is true for every BYO-key cloud provider", () => {
     expect(previewCostsCredits("eleven")).toBe(true);
     expect(previewCostsCredits("openai")).toBe(true);
+    expect(previewCostsCredits("speechify")).toBe(true);
+    expect(previewCostsCredits("deepgram")).toBe(true);
+    expect(previewCostsCredits("cartesia")).toBe(true);
+  });
+  it("is false for the free/local providers", () => {
     expect(previewCostsCredits("edge")).toBe(false);
     expect(previewCostsCredits("system")).toBe(false);
     expect(previewCostsCredits("piper")).toBe(false);
+  });
+});
+
+describe("isKeyProvider", () => {
+  it("marks the BYO-key cloud providers", () => {
+    expect(isKeyProvider("eleven")).toBe(true);
+    expect(isKeyProvider("openai")).toBe(true);
+    expect(isKeyProvider("speechify")).toBe(true);
+    expect(isKeyProvider("deepgram")).toBe(true);
+    expect(isKeyProvider("cartesia")).toBe(true);
+  });
+  it("leaves the free/local providers unmarked", () => {
+    expect(isKeyProvider("edge")).toBe(false);
+    expect(isKeyProvider("system")).toBe(false);
+    expect(isKeyProvider("piper")).toBe(false);
   });
 });
 

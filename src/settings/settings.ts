@@ -20,8 +20,18 @@ import {
 } from "../core/session";
 import { chordOf, findConflicts, normalizeChord } from "../core/shortcuts";
 import type { ActionId, ReaderTheme, Settings } from "../core/types";
-import { ACTION_LABELS, DEFAULT_SHORTCUTS, PLAYBACK_RATES, READER_FONTS } from "../core/types";
+import {
+  ACTION_LABELS,
+  DEFAULT_PLAYBACK_PREFS,
+  DEFAULT_READER_PREFS,
+  DEFAULT_SETTINGS,
+  DEFAULT_SHORTCUTS,
+  PLAYBACK_RATES,
+  READER_FONTS,
+} from "../core/types";
+import { invalidateCartesiaVoices } from "../player/providers/cartesia";
 import { invalidateElevenVoices } from "../player/providers/eleven";
+import { invalidateSpeechifyVoices } from "../player/providers/speechify";
 import { trapTab } from "../ui/focus";
 import { icon } from "../ui/icons";
 import { toast } from "../ui/toast";
@@ -198,7 +208,7 @@ const SECTIONS: { id: string; label: string; icon: string }[] = [
 ];
 const SECTION_IDS = new Set(SECTIONS.map((s) => s.id));
 
-type KeyProviderId = "eleven" | "openai";
+type KeyProviderId = "eleven" | "openai" | "speechify" | "deepgram" | "cartesia";
 
 const KEY_PROVIDERS: { id: KeyProviderId; label: string; placeholder: string; desc: string }[] = [
   {
@@ -213,15 +223,38 @@ const KEY_PROVIDERS: { id: KeyProviderId; label: string; placeholder: string; de
     placeholder: "OpenAI API key",
     desc: "Alloy, Nova, Shimmer and the other OpenAI voices",
   },
+  {
+    id: "speechify",
+    label: "Speechify",
+    placeholder: "Speechify API key",
+    desc: "Speechify's Simba voices via your API key",
+  },
+  {
+    id: "deepgram",
+    label: "Deepgram",
+    placeholder: "Deepgram API key",
+    desc: "Deepgram's Aura voices via your API key",
+  },
+  {
+    id: "cartesia",
+    label: "Cartesia",
+    placeholder: "Cartesia API key",
+    desc: "Cartesia's Sonic voices via your API key",
+  },
 ];
 
+// Colors mirror the reader themes in src/reader/reader.css so each swatch is a
+// true preview of the page surface. Default reads the live app page tokens.
 const READER_THEMES: { id: ReaderTheme; label: string; bg: string; text: string }[] = [
   { id: "default", label: "Default", bg: "var(--page-bg)", text: "var(--page-text)" },
-  { id: "paper", label: "Paper", bg: "#f4f1ea", text: "#33302b" },
-  { id: "sepia", label: "Sepia", bg: "#f3e6cf", text: "#5b4a33" },
-  { id: "slate", label: "Slate", bg: "#2b303a", text: "#ced4de" },
-  { id: "black", label: "Black", bg: "#000000", text: "#c7c7cf" },
+  { id: "paper", label: "Paper", bg: "#f4f1ea", text: "#2a2722" },
+  { id: "sepia", label: "Sepia", bg: "#f0e6d2", text: "#433422" },
+  { id: "slate", label: "Slate", bg: "#23262e", text: "#c9cfdb" },
+  { id: "black", label: "Black", bg: "#000000", text: "#b8b8bf" },
 ];
+
+/** Sections that expose a per-section "Reset" control in their header. */
+const RESETTABLE_SECTIONS = new Set(["appearance", "reader", "playback", "shortcuts", "storage"]);
 
 /* ================= small HTML builders ================= */
 
@@ -300,15 +333,24 @@ function fontGridHtml(activeId: string): string {
 }
 
 function swatchesHtml(active: ReaderTheme): string {
+  // Each swatch is a miniature page: the theme's real page background with an
+  // "Aa" in the theme's real text color — a true preview of the reading surface.
   return `<div class="set-swatches">${READER_THEMES.map(
     (t) => `<button type="button" class="set-swatch ${t.id === active ? "set-swatch--active" : ""}" data-rtheme="${t.id}" title="${escapeHtml(t.label)}" aria-label="${escapeHtml(t.label)}" aria-pressed="${t.id === active}">
       <span class="set-swatch__page" style="background:${t.bg};color:${t.text}">
-        <span class="set-swatch__line"></span>
-        <span class="set-swatch__line set-swatch__line--short"></span>
+        <span class="set-swatch__aa">Aa</span>
       </span>
       <span class="set-swatch__label">${escapeHtml(t.label)}</span>
     </button>`,
   ).join("")}</div>`;
+}
+
+/** Section header: the big title plus, for resettable sections, a ghost Reset. */
+function sectionHeadHtml(id: string, title: string): string {
+  const reset = RESETTABLE_SECTIONS.has(id)
+    ? `<button type="button" class="btn btn--sm btn--ghost" data-reset-section="${id}">Reset</button>`
+    : "";
+  return `<div class="set__head"><div class="set__title">${escapeHtml(title)}</div>${reset}</div>`;
 }
 
 /* ================= mount ================= */
@@ -350,8 +392,20 @@ export function mountSettings(el: HTMLElement, section?: string): SettingsView {
   let cacheStatsError = false;
   // API keys, per provider: presence (null = still checking) and whether the
   // row is in "replace" (input) mode.
-  const hasKey: Record<KeyProviderId, boolean | null> = { eleven: null, openai: null };
-  const keyReplacing: Record<KeyProviderId, boolean> = { eleven: false, openai: false };
+  const hasKey: Record<KeyProviderId, boolean | null> = {
+    eleven: null,
+    openai: null,
+    speechify: null,
+    deepgram: null,
+    cartesia: null,
+  };
+  const keyReplacing: Record<KeyProviderId, boolean> = {
+    eleven: false,
+    openai: false,
+    speechify: false,
+    deepgram: false,
+    cartesia: false,
+  };
 
   // Shortcut-capture state (kept out of render so re-renders don't drop it).
   let capturing: ActionId | null = null;
@@ -370,7 +424,7 @@ export function mountSettings(el: HTMLElement, section?: string): SettingsView {
 
   function appearanceHtml(s: Settings): string {
     return (
-      `<div class="set__title">Appearance</div>` +
+      sectionHeadHtml("appearance", "Appearance") +
       groupHtml(
         "Theme",
         rowHtml(
@@ -405,8 +459,8 @@ export function mountSettings(el: HTMLElement, section?: string): SettingsView {
       rowHtml("Justify text", switchHtml("r-justify", r.justify));
     const page = rowHtml("Reader theme", swatchesHtml(r.theme));
     return (
-      `<div class="set__title">Reader</div>
-      <p class="set__lead">These apply to the reading page. You can also change them from the Aa menu while reading.</p>` +
+      sectionHeadHtml("reader", "Reader") +
+      `<p class="set__lead">These apply to the reading page. You can also change them from the Aa menu while reading.</p>` +
       groupHtml("Text", text) +
       groupHtml("Page", page)
     );
@@ -426,6 +480,14 @@ export function mountSettings(el: HTMLElement, section?: string): SettingsView {
       rowHtml(
         "Volume",
         sliderHtml("p-vol", 0, 1, 0.05, pb.volume, `${Math.round(pb.volume * 100)}%`),
+      ) +
+      rowHtml(
+        "Audio quality",
+        selectHtml("p-quality", s.audioQuality, [
+          { value: "standard", label: "Standard" },
+          { value: "high", label: "High" },
+        ]),
+        "High synthesizes at a higher bitrate. Already-cached sentences re-synthesize at the new quality.",
       ) +
       rowHtml(
         "Highlight spoken text",
@@ -450,7 +512,7 @@ export function mountSettings(el: HTMLElement, section?: string): SettingsView {
       ) +
       rowHtml("Launch at startup", switchHtml("p-startup", s.launchAtStartup));
     return (
-      `<div class="set__title">Playback</div>` +
+      sectionHeadHtml("playback", "Playback") +
       groupHtml("Audio", audio) +
       groupHtml("App behavior", appBehavior)
     );
@@ -476,8 +538,8 @@ export function mountSettings(el: HTMLElement, section?: string): SettingsView {
       groupHtml(kp.label, rowHtml("API key", keyControlHtml(kp.id, kp.placeholder), kp.desc)),
     ).join("");
     return (
-      `<div class="set__title">API keys</div>
-      <p class="set__lead">Keys are stored in Windows Credential Manager, never in files or logs, and never leave this computer except to call the provider.</p>` +
+      sectionHeadHtml("keys", "API keys") +
+      `<p class="set__lead">Keys are stored in Windows Credential Manager, never in files or logs, and never leave this computer except to call the provider.</p>` +
       groups
     );
   }
@@ -511,14 +573,10 @@ export function mountSettings(el: HTMLElement, section?: string): SettingsView {
       })
       .join("");
     return (
-      `<div class="set__title">Shortcuts</div>
-      <p class="set__lead">Click a shortcut, then press a new key combination. Esc cancels · Backspace resets to default.</p>
+      sectionHeadHtml("shortcuts", "Shortcuts") +
+      `<p class="set__lead">Click a shortcut, then press a new key combination. Esc cancels · Backspace resets to default.</p>
       ${warn}` +
-      groupHtml(
-        "Reader & playback",
-        `<div class="set-sc-list">${rows}</div>`,
-        `<button type="button" class="btn btn--sm btn--ghost" id="sc-reset">Reset all</button>`,
-      )
+      groupHtml("Reader & playback", `<div class="set-sc-list">${rows}</div>`)
     );
   }
 
@@ -552,12 +610,12 @@ export function mountSettings(el: HTMLElement, section?: string): SettingsView {
         "Library, imported content, and settings",
       ),
     );
-    return `<div class="set__title">Storage</div>` + cacheGroup + dataGroup;
+    return sectionHeadHtml("storage", "Storage") + cacheGroup + dataGroup;
   }
 
   function aboutHtml(): string {
     return (
-      `<div class="set__title">About</div>` +
+      sectionHeadHtml("about", "About") +
       groupHtml(
         "Tarotalking",
         `<div class="set-about">
@@ -586,6 +644,7 @@ export function mountSettings(el: HTMLElement, section?: string): SettingsView {
   }
 
   function wireSimple(id: string): void {
+    wireSectionReset();
     if (id === "appearance") {
       inner.querySelectorAll<HTMLButtonElement>("[data-theme]").forEach((btn) => {
         btn.addEventListener("click", () =>
@@ -621,6 +680,11 @@ export function mountSettings(el: HTMLElement, section?: string): SettingsView {
 
   function wireReader(): void {
     inner.querySelectorAll<HTMLButtonElement>("[data-font]").forEach((btn) => {
+      // Paint each preview in its own font stack (belt-and-suspenders over the
+      // inline style, so every "Ag" renders in — and reads as — that font).
+      const ag = btn.querySelector<HTMLElement>(".set-font-card__ag");
+      const f = READER_FONTS.find((x) => x.id === btn.dataset.font);
+      if (ag && f) ag.style.fontFamily = f.stack;
       btn.addEventListener("click", () => updateReaderPrefs({ font: btn.dataset.font! }));
     });
     bindSlider("r-size", (v) => `${v}px`, (v) => updateReaderPrefs({ fontSize: v }));
@@ -641,6 +705,9 @@ export function mountSettings(el: HTMLElement, section?: string): SettingsView {
       updatePlaybackPrefs({ rate: Number((e.target as HTMLSelectElement).value) });
     });
     bindSlider("p-vol", (v) => `${Math.round(v * 100)}%`, (v) => updatePlaybackPrefs({ volume: v }));
+    inner.querySelector<HTMLSelectElement>("#p-quality")?.addEventListener("change", (e) => {
+      updateSettings({ audioQuality: (e.target as HTMLSelectElement).value as Settings["audioQuality"] });
+    });
     inner.querySelector<HTMLSelectElement>("#p-hl")?.addEventListener("change", (e) => {
       updatePlaybackPrefs({ highlight: (e.target as HTMLSelectElement).value as Settings["playback"]["highlight"] });
     });
@@ -732,6 +799,14 @@ export function mountSettings(el: HTMLElement, section?: string): SettingsView {
     });
   }
 
+  /** Drop a provider's cached voice list after its key changes (live-list
+   *  providers only; fixed-catalog providers keep their static list). */
+  function invalidateVoiceCache(provider: KeyProviderId): void {
+    if (provider === "eleven") invalidateElevenVoices();
+    else if (provider === "speechify") invalidateSpeechifyVoices();
+    else if (provider === "cartesia") invalidateCartesiaVoices();
+  }
+
   async function saveKey(provider: KeyProviderId, raw: string): Promise<void> {
     const value = raw.trim();
     if (!value) {
@@ -740,9 +815,9 @@ export function mountSettings(el: HTMLElement, section?: string): SettingsView {
     }
     try {
       await ipc.setKey(provider, value);
-      // ElevenLabs voices are fetched over the network and cached; OpenAI's are
-      // a static list, so only ElevenLabs needs its cache dropped.
-      if (provider === "eleven") invalidateElevenVoices();
+      // Providers with live (network-fetched) voice lists cache them, so a new
+      // key must drop that cache. OpenAI/Deepgram are fixed catalogs — no-op.
+      invalidateVoiceCache(provider);
       hasKey[provider] = true;
       keyReplacing[provider] = false;
       if (active === "keys") renderSimple("keys");
@@ -755,7 +830,7 @@ export function mountSettings(el: HTMLElement, section?: string): SettingsView {
   async function removeKey(provider: KeyProviderId): Promise<void> {
     try {
       await ipc.deleteKey(provider);
-      if (provider === "eleven") invalidateElevenVoices();
+      invalidateVoiceCache(provider);
       hasKey[provider] = false;
       keyReplacing[provider] = false;
       if (active === "keys") renderSimple("keys");
@@ -811,12 +886,48 @@ export function mountSettings(el: HTMLElement, section?: string): SettingsView {
       const action = rowEl.dataset.action as ActionId;
       rowEl.addEventListener("click", () => beginCapture(action));
     });
-    inner.querySelector<HTMLButtonElement>("#sc-reset")?.addEventListener("click", () => {
+  }
+
+  /* ---------------- per-section reset ---------------- */
+
+  /** Restore just the active section's slice of Settings to its defaults. */
+  function resetSection(id: string): void {
+    if (id === "appearance") {
+      updateSettings({ theme: "dark" });
+    } else if (id === "reader") {
+      updateSettings({ reader: { ...DEFAULT_READER_PREFS } });
+    } else if (id === "playback") {
+      const wasAutostart = settingsStore.get().launchAtStartup;
+      updateSettings({
+        playback: { ...DEFAULT_PLAYBACK_PREFS },
+        audioQuality: DEFAULT_SETTINGS.audioQuality,
+        closeToTray: DEFAULT_SETTINGS.closeToTray,
+        resumeLastItem: DEFAULT_SETTINGS.resumeLastItem,
+        notifications: DEFAULT_SETTINGS.notifications,
+        launchAtStartup: DEFAULT_SETTINGS.launchAtStartup,
+      });
+      if (wasAutostart !== DEFAULT_SETTINGS.launchAtStartup) {
+        void applyAutostart(DEFAULT_SETTINGS.launchAtStartup);
+      }
+    } else if (id === "shortcuts") {
+      updateSettings({ shortcuts: { ...DEFAULT_SHORTCUTS } });
+    } else if (id === "storage") {
+      // Reset the cap only — synthesized audio is left untouched.
+      updateSettings({ cacheLimitMB: DEFAULT_SETTINGS.cacheLimitMB });
+    }
+  }
+
+  function wireSectionReset(): void {
+    const btn = inner.querySelector<HTMLButtonElement>("[data-reset-section]");
+    if (!btn) return;
+    const id = btn.dataset.resetSection!;
+    const label = SECTIONS.find((s) => s.id === id)?.label ?? id;
+    btn.addEventListener("click", () => {
       confirmModal({
-        title: "Reset all shortcuts?",
-        message: "Every keyboard shortcut returns to its default binding.",
-        confirmLabel: "Reset all",
-        onConfirm: () => updateSettings({ shortcuts: { ...DEFAULT_SHORTCUTS } }),
+        title: `Reset ${label}?`,
+        message: "This returns these settings to their defaults.",
+        confirmLabel: "Reset",
+        onConfirm: () => resetSection(id),
       });
     });
   }
@@ -870,8 +981,7 @@ export function mountSettings(el: HTMLElement, section?: string): SettingsView {
       voicesDispose = null;
     }
     endCapture();
-    keyReplacing.eleven = false;
-    keyReplacing.openai = false;
+    for (const kp of KEY_PROVIDERS) keyReplacing[kp.id] = false;
     active = id;
     updateSidebar();
     content.scrollTop = 0;
@@ -889,8 +999,7 @@ export function mountSettings(el: HTMLElement, section?: string): SettingsView {
       cacheStatsError = false;
       void loadCacheStats();
     } else if (id === "keys") {
-      hasKey.eleven = null;
-      hasKey.openai = null;
+      for (const kp of KEY_PROVIDERS) hasKey[kp.id] = null;
       void loadHasKey();
     }
   }

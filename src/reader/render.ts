@@ -7,7 +7,7 @@
 // vitest environment) is safe; the DOM functions are only ever called in the
 // WebView.
 
-import { countWords, splitSentences } from "../core/segment";
+import { countWords, splitSentences, type SentenceSpan } from "../core/segment";
 import type { BlockType, ContentDoc, HighlightMode, Position } from "../core/types";
 
 /* ============================================================
@@ -91,15 +91,10 @@ export function topmostBlockIndex(offsets: number[], scrollTop: number): number 
   return ans;
 }
 
-/** Map a char offset within a block's full text to the sentence index that
- *  contains it (click-a-word-to-read resolution). When the offset lands in
- *  inter-sentence whitespace (a gap between spans, or before the first / past
- *  the last), fall back to the nearest sentence by interval distance. Uses the
- *  same splitSentences offsets the engine speaks, so the returned index maps to
- *  a real playback position. */
-export function sentenceIndexForOffset(blockText: string, charOffset: number): number {
-  const spans = splitSentences(blockText);
-  if (spans.length === 0) return 0;
+/** Nearest sentence index for a char offset, given precomputed spans. The span
+ *  the offset falls inside wins; otherwise the closest span by interval distance
+ *  (ties favor the earlier sentence). */
+function nearestSentence(spans: SentenceSpan[], charOffset: number): number {
   for (let i = 0; i < spans.length; i++) {
     const s = spans[i]!;
     if (charOffset >= s.start && charOffset < s.end) return i;
@@ -118,6 +113,33 @@ export function sentenceIndexForOffset(blockText: string, charOffset: number): n
   return best;
 }
 
+/** Map a char offset within a block's full text to the sentence index that
+ *  contains it (click-a-word-to-read resolution). When the offset lands in
+ *  inter-sentence whitespace (a gap between spans, or before the first / past
+ *  the last), fall back to the nearest sentence by interval distance. Uses the
+ *  same splitSentences offsets the engine speaks, so the returned index maps to
+ *  a real playback position. */
+export function sentenceIndexForOffset(blockText: string, charOffset: number): number {
+  const spans = splitSentences(blockText);
+  if (spans.length === 0) return 0;
+  return nearestSentence(spans, charOffset);
+}
+
+/** Resolve a block-text char offset to BOTH the sentence it falls in and the
+ *  char offset WITHIN that sentence (clamped to >= 0), from a single
+ *  splitSentences pass. Powers exact-word click-to-read: the reader hands the
+ *  in-sentence offset to the engine, which seeks to that word's audio boundary
+ *  when the provider reports one (otherwise playback starts at the sentence). */
+export function sentenceHitForOffset(
+  blockText: string,
+  charOffset: number,
+): { sentence: number; offset: number } {
+  const spans = splitSentences(blockText);
+  if (spans.length === 0) return { sentence: 0, offset: 0 };
+  const sentence = nearestSentence(spans, charOffset);
+  return { sentence, offset: Math.max(0, charOffset - spans[sentence]!.start) };
+}
+
 export interface WordParts {
   before: string;
   word: string;
@@ -131,6 +153,40 @@ export function splitWordParts(text: string, charStart: number, charLen: number)
   const start = Math.max(0, Math.min(charStart, len));
   const end = Math.max(start, Math.min(charStart + Math.max(0, charLen), len));
   return { before: text.slice(0, start), word: text.slice(start, end), after: text.slice(end) };
+}
+
+/** Result of filtering a labeled list for the TOC search. */
+export interface LabelFilter {
+  /** Indices into the source array to render — capped at `cap` while filtering,
+   *  every index (uncapped) for an empty query. */
+  indices: number[];
+  /** Matched items dropped by the cap (0 when nothing was dropped). */
+  overflow: number;
+  /** Whether a non-empty query was applied (drives "No matches" vs the full list). */
+  filtered: boolean;
+}
+
+/** Case-insensitive substring filter over a labeled list, returning matched
+ *  indices. An empty/whitespace query is a no-op (all indices, uncapped). While
+ *  filtering, at most `cap` indices are returned and the remainder is reported
+ *  as `overflow`, so a 6k-chapter book's matches never blow up the DOM. */
+export function filterByLabel<T>(
+  items: T[],
+  query: string,
+  labelOf: (item: T, index: number) => string,
+  cap = 400,
+): LabelFilter {
+  const q = query.trim().toLowerCase();
+  if (q === "") return { indices: items.map((_, i) => i), overflow: 0, filtered: false };
+  const indices: number[] = [];
+  let matched = 0;
+  for (let i = 0; i < items.length; i++) {
+    if (labelOf(items[i]!, i).toLowerCase().includes(q)) {
+      matched++;
+      if (indices.length < cap) indices.push(i);
+    }
+  }
+  return { indices, overflow: matched - indices.length, filtered: true };
 }
 
 /** The HTML tag a text block renders into. */

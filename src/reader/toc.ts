@@ -5,8 +5,9 @@
 import { formatRelative, formatTimeLeft, readingMinutes } from "../core/format";
 import { getItem, libraryStore, removeBookmark } from "../core/library";
 import { subscribeSelect } from "../core/store";
-import type { ContentDoc, LibraryItem, Position } from "../core/types";
+import type { Chapter, ContentDoc, LibraryItem, Position } from "../core/types";
 import { icon } from "../ui/icons";
+import { filterByLabel } from "./render";
 
 export interface TocOptions {
   doc: ContentDoc;
@@ -30,6 +31,7 @@ type Tab = "contents" | "bookmarks";
 
 export function mountToc(host: HTMLElement, opts: TocOptions): TocController {
   let tab: Tab = "contents";
+  let query = "";
 
   const root = document.createElement("div");
   root.className = "toc";
@@ -38,22 +40,65 @@ export function mountToc(host: HTMLElement, opts: TocOptions): TocController {
       <button class="btn btn--sm toc__tab" data-tab="contents">Contents</button>
       <button class="btn btn--sm toc__tab" data-tab="bookmarks">Bookmarks</button>
     </div>
+    <div class="toc__search">
+      <span class="toc__search-icon" aria-hidden="true">${icon.search}</span>
+      <input class="input toc__search-input" type="text" autocomplete="off" spellcheck="false" aria-label="Search the contents">
+      <button class="toc__search-clear" type="button" title="Clear search" aria-label="Clear search" hidden>${icon.x}</button>
+    </div>
     <div class="toc__list" role="list"></div>`;
   host.appendChild(root);
 
   const list = root.querySelector<HTMLElement>(".toc__list")!;
+  const search = root.querySelector<HTMLInputElement>(".toc__search-input")!;
+  const clearBtn = root.querySelector<HTMLButtonElement>(".toc__search-clear")!;
   const tabButtons = Array.from(root.querySelectorAll<HTMLButtonElement>(".toc__tab"));
 
   tabButtons.forEach((btn) => {
     btn.addEventListener("click", () => {
       tab = btn.dataset.tab as Tab;
+      // Keep the query across tabs and re-apply it to the newly active list.
       renderTabs();
       renderList();
     });
   });
 
+  function applyQuery(next: string): void {
+    query = next;
+    clearBtn.hidden = query === "";
+    renderList();
+  }
+  search.addEventListener("input", () => applyQuery(search.value));
+  search.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") {
+      // Clear in place; never let Escape bubble to the reader's Back action.
+      e.stopPropagation();
+      e.preventDefault();
+      if (search.value !== "") {
+        search.value = "";
+        applyQuery("");
+      }
+    }
+  });
+  clearBtn.addEventListener("click", () => {
+    search.value = "";
+    applyQuery("");
+    search.focus();
+  });
+
+  function chapterLabel(ch: Chapter, i: number): string {
+    return ch.title && ch.title.trim() ? ch.title : `Chapter ${i + 1}`;
+  }
+
+  function appendNote(text: string): void {
+    const note = document.createElement("div");
+    note.className = "toc__note faint";
+    note.textContent = text;
+    list.appendChild(note);
+  }
+
   function renderTabs(): void {
     tabButtons.forEach((btn) => btn.classList.toggle("btn--on", btn.dataset.tab === tab));
+    search.placeholder = tab === "contents" ? "Search chapters" : "Search bookmarks";
   }
 
   function renderList(): void {
@@ -64,7 +109,14 @@ export function mountToc(host: HTMLElement, opts: TocOptions): TocController {
 
   function renderContents(): void {
     const current = opts.currentChapter();
-    opts.doc.chapters.forEach((ch, i) => {
+    const chapters = opts.doc.chapters;
+    const { indices, overflow, filtered } = filterByLabel(chapters, query, chapterLabel);
+    if (filtered && indices.length === 0) {
+      appendNote("No matches");
+      return;
+    }
+    for (const i of indices) {
+      const ch = chapters[i]!;
       const row = document.createElement("button");
       row.className = "toc__row toc__chapter";
       row.classList.toggle("toc__row--current", i === current);
@@ -72,7 +124,7 @@ export function mountToc(host: HTMLElement, opts: TocOptions): TocController {
 
       const title = document.createElement("span");
       title.className = "toc__row-title";
-      title.textContent = ch.title && ch.title.trim() ? ch.title : `Chapter ${i + 1}`;
+      title.textContent = chapterLabel(ch, i);
 
       const mins = document.createElement("span");
       mins.className = "toc__row-meta faint";
@@ -82,7 +134,8 @@ export function mountToc(host: HTMLElement, opts: TocOptions): TocController {
       row.append(title, mins);
       row.addEventListener("click", () => opts.onJumpChapter({ chapter: i, block: 0, sentence: 0 }));
       list.appendChild(row);
-    });
+    }
+    if (overflow > 0) appendNote(`…and ${overflow} more — keep typing`);
   }
 
   function renderBookmarks(): void {
@@ -97,7 +150,13 @@ export function mountToc(host: HTMLElement, opts: TocOptions): TocController {
     }
     // Newest first.
     const sorted = [...bookmarks].sort((a, b) => b.createdAt - a.createdAt);
-    for (const bm of sorted) {
+    const { indices, overflow, filtered } = filterByLabel(sorted, query, (bm) => bm.label || "Bookmark");
+    if (filtered && indices.length === 0) {
+      appendNote("No matches");
+      return;
+    }
+    for (const idx of indices) {
+      const bm = sorted[idx]!;
       const row = document.createElement("div");
       row.className = "toc__row toc__bookmark";
 
@@ -129,6 +188,7 @@ export function mountToc(host: HTMLElement, opts: TocOptions): TocController {
       row.append(main, del);
       list.appendChild(row);
     }
+    if (overflow > 0) appendNote(`…and ${overflow} more — keep typing`);
   }
 
   // Live-refresh the bookmarks list when the item's bookmarks change.

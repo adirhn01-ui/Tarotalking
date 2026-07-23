@@ -3,8 +3,10 @@
 // engine for live sentence/word highlighting, auto-scroll, and position sync.
 //
 // Contract: `mountReader(el, itemId): Promise<ReaderView>`. The engine is a
-// global singleton that outlives this view (background playback), so dispose
-// never unloads it.
+// global singleton that outlives this view, so dispose never unloads it (saved
+// positions persist). Dispose does pause it, though: leaving the book stops
+// playback, and reopening resumes from the same spot showing paused. Closing to
+// the tray keeps playing — that path is handled in main.ts, not here.
 
 import "./reader.css";
 import { convertFileSrc } from "@tauri-apps/api/core";
@@ -44,7 +46,7 @@ import {
   createHighlighter,
   pctForPosition,
   renderChapter,
-  sentenceIndexForOffset,
+  sentenceHitForOffset,
   topmostBlockIndex,
   widthBucketLabel,
 } from "./render";
@@ -247,7 +249,7 @@ export async function mountReader(el: HTMLElement, itemId: string): Promise<Read
     if (blockEls.length === 0) return;
     const pos = currentTopPos();
     const pct = pctForPosition(charIndex, pos);
-    setReadingPosition(itemId, pos, pct);
+    setReadingPosition(itemId, pos, pct, doc.chapters[pos.chapter]?.title);
     updateProgressLabel(pct);
     updateBookmarkBtn(pos);
   }
@@ -382,7 +384,7 @@ export async function mountReader(el: HTMLElement, itemId: string): Promise<Read
     scrollToBlockInstant(pos.block, 12);
     const p: Position = { chapter: pos.chapter, block: pos.block, sentence: 0 };
     const pct = pctForPosition(charIndex, p);
-    setReadingPosition(itemId, p, pct);
+    setReadingPosition(itemId, p, pct, doc.chapters[p.chapter]?.title);
     updateProgressLabel(pct);
     updateBookmarkBtn(p);
     if (flash) flashBlock(pos.block);
@@ -785,7 +787,10 @@ export async function mountReader(el: HTMLElement, itemId: string): Promise<Read
     return total;
   }
 
-  function resolveClickPos(clientX: number, clientY: number): Position | null {
+  function resolveClickPos(
+    clientX: number,
+    clientY: number,
+  ): { pos: Position; charOffset: number } | null {
     const range = document.caretRangeFromPoint(clientX, clientY);
     if (!range) return null;
     const node = range.startContainer;
@@ -796,8 +801,9 @@ export async function mountReader(el: HTMLElement, itemId: string): Promise<Read
     const block = Number(blockEl.dataset.b);
     const text = doc.chapters[chapter]?.blocks[block]?.text ?? "";
     if (!text) return null;
-    const offset = charOffsetInBlock(blockEl, node, range.startOffset);
-    return { chapter, block, sentence: sentenceIndexForOffset(text, offset) };
+    const blockOffset = charOffsetInBlock(blockEl, node, range.startOffset);
+    const { sentence, offset } = sentenceHitForOffset(text, blockOffset);
+    return { pos: { chapter, block, sentence }, charOffset: offset };
   }
 
   let clickDownX = 0;
@@ -818,8 +824,10 @@ export async function mountReader(el: HTMLElement, itemId: string): Promise<Read
     if (sel && !sel.isCollapsed) return; // drag- or double-click selection: leave it alone
     const target = e.target as HTMLElement | null;
     if (!target || target.closest("img, hr, a, .reader-chapter-title")) return;
-    const pos = resolveClickPos(e.clientX, e.clientY);
-    if (pos) engine.playFrom(pos);
+    const hit = resolveClickPos(e.clientX, e.clientY);
+    // Start at the exact clicked word (in-sentence char offset), not the top of
+    // the sentence — the engine seeks to that word when boundaries exist.
+    if (hit) engine.playFrom(hit.pos, hit.charOffset);
   };
   surface.addEventListener("pointerdown", onSurfacePointerDown);
   surface.addEventListener("pointerup", onSurfacePointerUp);
@@ -851,9 +859,14 @@ export async function mountReader(el: HTMLElement, itemId: string): Promise<Read
       if (disposed) return;
       disposed = true;
 
+      // Leaving the book stops playback (position persists, so reopening resumes
+      // from the same spot showing paused). Window-close/tray keeps playing and
+      // is handled in main.ts. pause() is a no-op when nothing is playing.
+      engine.pause();
+
       // Persist the reading position immediately.
       const pos = currentTopPos();
-      setReadingPosition(itemId, pos, pctForPosition(charIndex, pos));
+      setReadingPosition(itemId, pos, pctForPosition(charIndex, pos), doc.chapters[pos.chapter]?.title);
       void flushLibrary();
 
       unsubReader();
