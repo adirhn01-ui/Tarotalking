@@ -13,13 +13,16 @@
     "icon": "node scripts/make-icon.mjs"
   },
   "dependencies": {
+    "@mozilla/readability": "^0.6.0",
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-autostart": "^2",
     "@tauri-apps/plugin-dialog": "^2",
     "@tauri-apps/plugin-notification": "^2",
-    "@tauri-apps/plugin-opener": "^2"
+    "@tauri-apps/plugin-opener": "^2",
+    "marked": "^18.0.7"
   },
   "devDependencies": {
+    "@resvg/resvg-js": "^2.6.2",
     "@tauri-apps/cli": "^2",
     "typescript": "^5.7",
     "vite": "^6",

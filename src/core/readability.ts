@@ -4,6 +4,7 @@
 // for v1 (the strict CSP blocks remote origins), so the resolver always returns
 // null. Scoring + title helpers are pure and exported for unit tests.
 
+import { Readability } from "@mozilla/readability";
 import type { Block } from "./types";
 import { domToBlocks } from "./epub-blocks";
 import { normalizeWhitespace } from "./segment";
@@ -93,7 +94,38 @@ function extractByline(dom: Document): string | undefined {
   return undefined;
 }
 
+/** Primary extraction path: Mozilla Readability (the Firefox reader-mode
+ *  engine — battle-tested on the messy real web). It mutates its input, so it
+ *  gets a clone; its HTML output is re-parsed inertly and converted to our
+ *  block model (still no raw HTML in the reader DOM). Falls back to the
+ *  in-house scorer below when Readability declines the page. */
 export function extractArticle(dom: Document): ExtractedArticle | null {
+  try {
+    const clone = dom.cloneNode(true) as Document;
+    const article = new Readability(clone, { charThreshold: 250 }).parse();
+    if (article?.content) {
+      const inner = new DOMParser().parseFromString(article.content, "text/html");
+      const root = inner.body ?? inner.documentElement;
+      if (root) {
+        const blocks = domToBlocks(root, () => null);
+        if (textLen(blocks) >= 250) {
+          const title =
+            (article.title && normalizeWhitespace(article.title)) || extractTitle(dom);
+          const byline =
+            (article.byline && normalizeWhitespace(article.byline).slice(0, 100)) ||
+            extractByline(dom);
+          return byline ? { title, byline, blocks } : { title, blocks };
+        }
+      }
+    }
+  } catch {
+    // Malformed page tripped Readability — the heuristic below still runs.
+  }
+  return extractArticleHeuristic(dom);
+}
+
+/** In-house fallback scorer (kept for pages Readability rejects). */
+export function extractArticleHeuristic(dom: Document): ExtractedArticle | null {
   dom.querySelectorAll(STRIP_SELECTOR).forEach((el) => el.remove());
 
   const body: Element = dom.body ?? dom.documentElement;

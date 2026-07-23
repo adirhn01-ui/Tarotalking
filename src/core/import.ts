@@ -249,7 +249,20 @@ async function importEpubFile(path: string): Promise<{ id: string; title: string
 async function importTextFile(path: string, markdown: boolean): Promise<{ id: string; title: string }> {
   const text = await ipc.readTextFile(path);
   const title = fileStem(path);
-  const blocks = chunkTextToBlocks(text, markdown);
+  // Markdown goes through a real parser (marked → inert DOM → blocks) so
+  // lists, nested emphasis, code fences, and tables import faithfully;
+  // plain text keeps the fast blank-line chunker.
+  let blocks: Block[];
+  if (markdown) {
+    const { marked } = await import("marked");
+    const html = await marked.parse(text, { gfm: true });
+    const parsed = new DOMParser().parseFromString(html, "text/html");
+    const root = parsed.body ?? parsed.documentElement;
+    blocks = root ? domToBlocks(root, () => null) : [];
+    if (blocks.length === 0) blocks = chunkTextToBlocks(text, true); // pathological md: fall back
+  } else {
+    blocks = chunkTextToBlocks(text, false);
+  }
   if (blocks.length === 0) throw new Error("This file has no readable text");
 
   const chapters: Chapter[] = [{ title, blocks }];

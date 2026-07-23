@@ -1,15 +1,15 @@
 #!/usr/bin/env node
-// Generates the Tarotalking app icon: an accent-violet (#8a7cff, matches the
-// --accent token) rounded square with a bold white "T" plus two sound-wave
-// arcs — the reading sibling of Taroting's plain "T". Pure Node (zlib PNG
-// encoder, per-pixel math, 2x2 supersampling); no dependencies, no ffmpeg.
+// Generates the Tarotalking app icon: the app's own bookOpen glyph (the open
+// book whose spine descends below the pages — reading as a "T") in white on
+// the accent-violet rounded tile. Rendered from real SVG via resvg, so the
+// icon is pixel-faithful to the in-app icon set (same path data).
 //
 //   node scripts/make-icon.mjs
 //   npx tauri icon src-tauri/icon-src-1024.png
 //
 // Output: src-tauri/icon-src-1024.png (source for `npx tauri icon`).
 
-import { deflateSync } from "node:zlib";
+import { Resvg } from "@resvg/resvg-js";
 import { writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -18,139 +18,27 @@ const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const out = path.join(root, "src-tauri", "icon-src-1024.png");
 
 const S = 1024;
-const R = 180; // corner radius
-const BG = [0x8a, 0x7c, 0xff]; // --accent (dark theme)
-const FG = [0xff, 0xff, 0xff];
+const CORNER = 180; // tile corner radius
+const ACCENT = "#8a7cff"; // --accent (dark theme)
 
-/* ---- geometry ---- */
+// The bookOpen path from src/ui/icons.ts, verbatim (24 viewBox).
+const BOOK_OPEN =
+  "M2 4h6a4 4 0 0 1 4 4v12a3 3 0 0 0-3-3H2z M22 4h-6a4 4 0 0 0-4 4v12a3 3 0 0 1 3-3h7z";
 
-// Rounded-square coverage: 1 inside, 0 outside.
-function inRoundedSquare(x, y) {
-  const dx = Math.max(0, R - x, x - (S - 1 - R));
-  const dy = Math.max(0, R - y, y - (S - 1 - R));
-  return Math.hypot(dx, dy) <= R;
-}
+// Scale the 24-box glyph (content x:2..22, y:4..21) into the tile.
+const SCALE = 30; // glyph width 20u → 600px
+const TX = (S - 20 * SCALE) / 2 - 2 * SCALE; // center x (content starts at x=2)
+const TY = (S - 17 * SCALE) / 2 - 4 * SCALE; // center y (content starts at y=4)
 
-// The "T as an open book": the crossbar is the two open pages (slanting
-// gently down toward the center, the way page tops dip into the spine) and
-// the stem is the book's spine. Page-edge accents under each arm suggest the
-// page stack. Reads as a bold T at a glance, as an open book on a look.
-// The app's own bookOpen glyph, scaled up: an OUTLINE open book whose center
-// spine descends below the pages — reading as a "T". Drawn as round-capped
-// strokes (distance-to-segment test), matching the in-app icon style.
-const STROKE_HALF = 30; // stroke width 60 at 1024
+const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${S}" height="${S}" viewBox="0 0 ${S} ${S}">
+  <rect width="${S}" height="${S}" rx="${CORNER}" fill="${ACCENT}"/>
+  <g transform="translate(${TX} ${TY}) scale(${SCALE})">
+    <path d="${BOOK_OPEN}" fill="none" stroke="#ffffff" stroke-width="1.9"
+          stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+</svg>`;
 
-// Each entry is a polyline; round caps/joins come free from distance math.
-const LEFT_PAGE = [
-  [245, 300], [412, 300], [496, 332], // top edge, bending into the spine
-];
-const LEFT_SIDE = [
-  [245, 300], [245, 686], // outer edge
-];
-const LEFT_BOTTOM = [
-  [245, 686], [412, 686], [496, 718], // bottom edge, bending into the spine
-];
-const SPINE = [
-  [512, 332], [512, 772], // the "T" stem, dropping below the page bottoms
-];
-
-function mirror(poly) {
-  return poly.map(([x, y]) => [1024 - x, y]);
-}
-
-const POLYLINES = [
-  LEFT_PAGE, LEFT_SIDE, LEFT_BOTTOM,
-  mirror(LEFT_PAGE), mirror(LEFT_SIDE), mirror(LEFT_BOTTOM),
-  SPINE,
-];
-
-function distToSegment(px, py, ax, ay, bx, by) {
-  const dx = bx - ax;
-  const dy = by - ay;
-  const len2 = dx * dx + dy * dy;
-  const t = len2 === 0 ? 0 : Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / len2));
-  return Math.hypot(px - (ax + t * dx), py - (ay + t * dy));
-}
-
-function inGlyph(x, y) {
-  for (const poly of POLYLINES) {
-    for (let i = 0; i + 1 < poly.length; i++) {
-      const [ax, ay] = poly[i];
-      const [bx, by] = poly[i + 1];
-      if (distToSegment(x, y, ax, ay, bx, by) <= STROKE_HALF) return true;
-    }
-  }
-  return false;
-}
-
-/* ---- render with 2x2 supersampling ---- */
-
-const raw = Buffer.alloc(S * (S * 4 + 1)); // +1 filter byte per scanline
-const offsets = [
-  [0.25, 0.25],
-  [0.75, 0.25],
-  [0.25, 0.75],
-  [0.75, 0.75],
-];
-
-for (let y = 0; y < S; y++) {
-  const row = y * (S * 4 + 1);
-  raw[row] = 0; // filter: none
-  for (let x = 0; x < S; x++) {
-    let cover = 0; // rounded-square coverage
-    let glyph = 0; // white-glyph coverage
-    for (const [ox, oy] of offsets) {
-      const sx = x + ox;
-      const sy = y + oy;
-      if (inRoundedSquare(sx, sy)) {
-        cover++;
-        if (inGlyph(sx, sy)) glyph++;
-      }
-    }
-    const a = (cover / 4) * 255;
-    const g = glyph / Math.max(1, cover);
-    const px = row + 1 + x * 4;
-    raw[px] = Math.round(BG[0] + (FG[0] - BG[0]) * g);
-    raw[px + 1] = Math.round(BG[1] + (FG[1] - BG[1]) * g);
-    raw[px + 2] = Math.round(BG[2] + (FG[2] - BG[2]) * g);
-    raw[px + 3] = Math.round(a);
-  }
-}
-
-/* ---- minimal PNG encoder ---- */
-
-const CRC_TABLE = new Int32Array(256);
-for (let n = 0; n < 256; n++) {
-  let c = n;
-  for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
-  CRC_TABLE[n] = c;
-}
-function crc32(buf) {
-  let c = 0xffffffff;
-  for (const b of buf) c = CRC_TABLE[(c ^ b) & 0xff] ^ (c >>> 8);
-  return (c ^ 0xffffffff) >>> 0;
-}
-function chunk(type, data) {
-  const len = Buffer.alloc(4);
-  len.writeUInt32BE(data.length);
-  const body = Buffer.concat([Buffer.from(type, "ascii"), data]);
-  const crc = Buffer.alloc(4);
-  crc.writeUInt32BE(crc32(body));
-  return Buffer.concat([len, body, crc]);
-}
-
-const ihdr = Buffer.alloc(13);
-ihdr.writeUInt32BE(S, 0);
-ihdr.writeUInt32BE(S, 4);
-ihdr[8] = 8; // bit depth
-ihdr[9] = 6; // RGBA
-const png = Buffer.concat([
-  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
-  chunk("IHDR", ihdr),
-  chunk("IDAT", deflateSync(raw, { level: 9 })),
-  chunk("IEND", Buffer.alloc(0)),
-]);
-
+const png = new Resvg(svg, { fitTo: { mode: "width", value: S } }).render().asPng();
 writeFileSync(out, png);
-console.log("icon source ready:", path.relative(root, out));
+console.log("icon source ready:", path.relative(root, out), `(${png.length} bytes)`);
 console.log("next: npx tauri icon", path.relative(root, out));
