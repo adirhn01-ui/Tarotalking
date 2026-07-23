@@ -1,0 +1,99 @@
+/* Player bar — embedded at the bottom of the reader. */
+
+.pbar {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  height: 64px;
+  padding: 0 var(--sp-4);
+  background: var(--bg-panel);
+  border-top: 1px solid var(--border);
+}
+
+.pbar__voice {
+  max-width: 190px;
+  flex: none;
+}
+.pbar__voice-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.pbar__voice svg:last-child {
+  width: 12px;
+  height: 12px;
+  opacity: 0.6;
+}
+
+.pbar__transport {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+  flex: none;
+}
+.pbar__play {
+  border-radius: var(--radius-full);
+  margin: 0 var(--sp-1);
+}
+
+.pbar__seek {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+}
+.pbar__slider {
+  flex: 1;
+  min-width: 60px;
+}
+.pbar__time {
+  flex: none;
+  font-size: var(--fs-12);
+  font-variant-numeric: tabular-nums;
+  min-width: 84px;
+  text-align: right;
+}
+
+.pbar__rate {
+  flex: none;
+  min-width: 44px;
+  font-variant-numeric: tabular-nums;
+}
+
+.pbar__vol {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex: none;
+}
+.pbar__vol-icon {
+  display: inline-flex;
+  color: var(--text-3);
+}
+.pbar__vol-icon svg {
+  width: 16px;
+  height: 16px;
+}
+.pbar__vol-slider {
+  width: 76px;
+}
+
+/* Narrow windows: shed the voice label and volume slider first. */
+@media (max-width: 1060px) {
+  .pbar__voice-name {
+    display: none;
+  }
+  .pbar__voice {
+    max-width: none;
+  }
+}
+@media (max-width: 920px) {
+  .pbar__vol-slider {
+    width: 52px;
+  }
+  .pbar__time {
+    display: none;
+  }
+}

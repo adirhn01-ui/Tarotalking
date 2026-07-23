@@ -25,7 +25,7 @@ pub struct SynthResult {
     pub boundaries: Option<Vec<WordBoundary>>,
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct VoiceInfo {
     pub provider: String,

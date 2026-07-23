@@ -31,6 +31,14 @@ pub fn read_field_bool(name: &str, default: bool) -> bool {
         .unwrap_or(default)
 }
 
+/// Read a single numeric field from settings.json.
+pub fn read_field_u64(name: &str) -> Option<u64> {
+    settings_load()
+        .ok()
+        .flatten()
+        .and_then(|v| v.get(name).and_then(Value::as_u64))
+}
+
 /// Read a single string field from settings.json.
 pub fn read_field_str(name: &str) -> Option<String> {
     settings_load()
