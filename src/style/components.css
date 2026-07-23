@@ -101,13 +101,13 @@
 }
 
 .btn svg {
-  width: 14px;
-  height: 14px;
+  width: 12px;
+  height: 12px;
   flex: none;
 }
 .btn--lg svg {
-  width: 18px;
-  height: 18px;
+  width: 16px;
+  height: 16px;
 }
 
 /* ---------- Inputs ---------- */
@@ -356,8 +356,8 @@ textarea.input {
   user-select: none;
 }
 .empty-state svg {
-  width: 34px;
-  height: 34px;
+  width: 26px;
+  height: 26px;
   opacity: 0.4;
 }
 

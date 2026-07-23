@@ -70,6 +70,9 @@ export interface LibraryItem {
   chapterCount: number;
   /** Absolute path to the cover image (EPUBs); UI renders a gradient cover otherwise. */
   cover?: string;
+  /** Title of the chapter the reading/listening position sits in — shown on
+   *  library cards as "where you left off". */
+  chapterLabel?: string;
   /** Reading position (what's on screen). */
   reading: Position;
   /** Listening position (what's being spoken). */
@@ -99,7 +102,15 @@ export const IMPORT_EXTENSIONS = new Set(["epub", "txt", "md"]);
 
 /* ================= voices / TTS ================= */
 
-export type ProviderId = "system" | "edge" | "piper" | "eleven" | "openai";
+export type ProviderId =
+  | "system"
+  | "edge"
+  | "piper"
+  | "eleven"
+  | "openai"
+  | "speechify"
+  | "deepgram"
+  | "cartesia";
 
 export const PROVIDER_LABELS: Record<ProviderId, string> = {
   system: "System voices",
@@ -107,7 +118,21 @@ export const PROVIDER_LABELS: Record<ProviderId, string> = {
   piper: "Local voices",
   eleven: "ElevenLabs",
   openai: "OpenAI",
+  speechify: "Speechify",
+  deepgram: "Deepgram",
+  cartesia: "Cartesia",
 };
+
+export const ALL_PROVIDER_IDS: readonly ProviderId[] = [
+  "system",
+  "edge",
+  "piper",
+  "eleven",
+  "openai",
+  "speechify",
+  "deepgram",
+  "cartesia",
+];
 
 /** What settings persist to pick a voice. */
 export interface VoiceRef {
@@ -204,10 +229,15 @@ export interface PlaybackPrefs {
   highlight: HighlightMode;
 }
 
+export type AudioQuality = "standard" | "high";
+
 export interface Settings {
   theme: AppTheme;
   reader: ReaderPrefs;
   playback: PlaybackPrefs;
+  /** Synthesis quality for providers with tunable formats (Edge, ElevenLabs).
+   *  Part of the audio cache key — switching re-synthesizes. */
+  audioQuality: AudioQuality;
   shortcuts: Record<string, string>;
   cacheLimitMB: number;
   closeToTray: boolean;
@@ -311,6 +341,7 @@ export const DEFAULT_SETTINGS: Settings = {
   theme: "dark",
   reader: DEFAULT_READER_PREFS,
   playback: DEFAULT_PLAYBACK_PREFS,
+  audioQuality: "high",
   shortcuts: { ...DEFAULT_SHORTCUTS },
   cacheLimitMB: 200,
   closeToTray: true,

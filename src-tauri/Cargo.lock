@@ -3589,6 +3589,7 @@ checksum = "61c41af27dd6d1e27b1b16b489db798443478cef1f06a660c96db617ba5de3b1"
 name = "tarotalking"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "keyring",
  "quick-xml 0.37.5",
  "serde",
@@ -4448,6 +4449,8 @@ dependencies = [
  "once_cell",
  "rustls",
  "rustls-pki-types",
+ "serde",
+ "serde_json",
  "url",
  "webpki-roots 0.26.11",
 ]

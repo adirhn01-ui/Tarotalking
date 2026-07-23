@@ -116,6 +116,8 @@ export const ipc = {
   systemVoices: (): Promise<VoiceInfo[]> => call("system_voices"),
   edgeVoices: (): Promise<VoiceInfo[]> => call("edge_voices"),
   elevenVoices: (): Promise<VoiceInfo[]> => call("eleven_voices"),
+  speechifyVoices: (): Promise<VoiceInfo[]> => call("speechify_voices"),
+  cartesiaVoices: (): Promise<VoiceInfo[]> => call("cartesia_voices"),
 
   /* ----- piper local voices ----- */
   piperStatus: (): Promise<PiperStatus> => call("piper_status"),

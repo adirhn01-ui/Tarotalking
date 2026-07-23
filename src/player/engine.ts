@@ -90,6 +90,9 @@ const prefetch = new Map<string, Promise<SynthResult>>();
 let wordTimer: number | undefined;
 let currentBounds: WordBoundary[] | null = null;
 let boundIndex = 0;
+/** One-shot: start the NEXT spoken sentence at this char offset (click-a-word).
+ *  Consumed by speakCurrent; only effective when boundaries exist. */
+let pendingWordSeek: number | null = null;
 let sleepTimeout: number | undefined;
 let lastReportedPlaying: boolean | null = null;
 
@@ -226,9 +229,10 @@ function persistPosition(): void {
   const id = itemId;
   const p = pos;
   const pct = pctOf(p);
+  const label = doc?.chapters[p.chapter]?.title;
   window.clearTimeout(persistTimer);
   persistTimer = window.setTimeout(() => {
-    setPlaybackPosition(id, p);
+    setPlaybackPosition(id, p, label);
     updateItem(id, { progressPct: pct });
   }, 500);
 }
@@ -355,6 +359,7 @@ function armNextBoundary(): void {
 function cancelCurrentAudio(): void {
   clearWordTimer();
   currentBounds = null;
+  pendingWordSeek = null;
   activeWord.set(null);
   if (utterHandle) {
     utterHandle.cancel();
@@ -404,6 +409,14 @@ async function speakCurrent(): Promise<void> {
     el.volume = prefs.volume;
     currentBounds = result.boundaries?.length ? result.boundaries : null;
     boundIndex = 0;
+    // Click-a-word: jump into the sentence at the clicked word's audio offset
+    // (word boundaries required — providers without them start at the top).
+    if (pendingWordSeek !== null) {
+      const target = pendingWordSeek;
+      pendingWordSeek = null;
+      const hit = currentBounds?.find((b) => b.charLen > 0 && b.charStart + b.charLen > target);
+      if (hit && hit.offsetMs > 0) el.currentTime = hit.offsetMs / 1000;
+    }
     try {
       await el.play();
     } catch (e) {
@@ -644,11 +657,14 @@ export const engine = {
   },
 
   /** Jump to a position and speak from it (click-a-word-to-read). If already
-   *  playing, speech moves immediately; otherwise playback starts. */
-  playFrom(p: Position): void {
+   *  playing, speech moves immediately; otherwise playback starts.
+   *  `charOffset` (chars into the sentence) starts at that exact word when
+   *  the provider reports word boundaries. */
+  playFrom(p: Position, charOffset?: number): void {
     const next = normalize(p);
     if (!next) return;
-    seekInternal(next);
+    seekInternal(next); // cancels current audio (which resets any pending seek)
+    pendingWordSeek = typeof charOffset === "number" && charOffset > 0 ? charOffset : null;
     const st = engineState.get().status;
     if (st !== "playing" && st !== "loading") void engine.play();
   },

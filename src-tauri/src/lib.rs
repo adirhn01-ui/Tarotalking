@@ -181,6 +181,8 @@ pub fn run() {
             tts::system::system_voices,
             tts::edge::edge_voices,
             tts::eleven::eleven_voices,
+            tts::speechify::speechify_voices,
+            tts::cartesia::cartesia_voices,
             tts::piper::piper_status,
             tts::piper::piper_install_binary,
             tts::piper::piper_install_model,

@@ -28,7 +28,15 @@ const WSS_BASE: &str =
     "wss://speech.platform.bing.com/consumer/speech/synthesize/readaloud/edge/v1";
 const VOICES_URL: &str =
     "https://speech.platform.bing.com/consumer/speech/synthesize/readaloud/voices/list";
-const OUTPUT_FORMAT: &str = "audio-24khz-48kbitrate-mono-mp3";
+/// Bitrate tracks the user's audio-quality setting; both are formats the
+/// read-aloud endpoint serves natively.
+fn output_format() -> &'static str {
+    if crate::tts::cache::audio_quality() == "standard" {
+        "audio-24khz-48kbitrate-mono-mp3"
+    } else {
+        "audio-24khz-96kbitrate-mono-mp3"
+    }
+}
 const UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0";
 
 /// Random per-connection browser id the service expects as a `muid` cookie.
@@ -135,9 +143,10 @@ fn synth_once(voice_id: &str, text: &str, out: &Path) -> Result<Vec<WordBoundary
     }
 
     let ts = timestamp();
+    let format = output_format();
     let config = format!(
         "X-Timestamp:{ts}\r\nContent-Type:application/json; charset=utf-8\r\nPath:speech.config\r\n\r\n\
-        {{\"context\":{{\"synthesis\":{{\"audio\":{{\"metadataoptions\":{{\"sentenceBoundaryEnabled\":\"false\",\"wordBoundaryEnabled\":\"true\"}},\"outputFormat\":\"{OUTPUT_FORMAT}\"}}}}}}}}"
+        {{\"context\":{{\"synthesis\":{{\"audio\":{{\"metadataoptions\":{{\"sentenceBoundaryEnabled\":\"false\",\"wordBoundaryEnabled\":\"true\"}},\"outputFormat\":\"{format}\"}}}}}}}}"
     );
     socket.send(Message::text(config)).map_err(offline)?;
 

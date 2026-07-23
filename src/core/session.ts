@@ -4,7 +4,14 @@
 import { ipc } from "./ipc";
 import { Store } from "./store";
 import type { AppTheme, ReaderTheme, Settings, VoiceRef } from "./types";
-import { DEFAULT_PLAYBACK_PREFS, DEFAULT_READER_PREFS, DEFAULT_SETTINGS, DEFAULT_SHORTCUTS, PLAYBACK_RATES } from "./types";
+import {
+  ALL_PROVIDER_IDS,
+  DEFAULT_PLAYBACK_PREFS,
+  DEFAULT_READER_PREFS,
+  DEFAULT_SETTINGS,
+  DEFAULT_SHORTCUTS,
+  PLAYBACK_RATES,
+} from "./types";
 
 export const settingsStore = new Store<Settings>(DEFAULT_SETTINGS);
 
@@ -40,15 +47,12 @@ function sanitizeVoice(v: unknown): VoiceRef | null {
   const provider = o.provider;
   const id = o.id;
   if (
-    (provider === "system" ||
-      provider === "edge" ||
-      provider === "piper" ||
-      provider === "eleven" ||
-      provider === "openai") &&
+    typeof provider === "string" &&
+    (ALL_PROVIDER_IDS as readonly string[]).includes(provider) &&
     typeof id === "string" &&
     id.length > 0
   ) {
-    return { provider, id };
+    return { provider: provider as VoiceRef["provider"], id };
   }
   return null;
 }
@@ -87,6 +91,7 @@ export function sanitizeSettings(raw: unknown): Settings {
       highlight: oneOf(playback.highlight, ["sentence", "word", "off"], "sentence"),
     },
     shortcuts,
+    audioQuality: oneOf(o.audioQuality, ["standard", "high"], "high"),
     cacheLimitMB: num(o.cacheLimitMB, DEFAULT_SETTINGS.cacheLimitMB, 20, 4000),
     closeToTray: bool(o.closeToTray, DEFAULT_SETTINGS.closeToTray),
     resumeLastItem: bool(o.resumeLastItem, DEFAULT_SETTINGS.resumeLastItem),

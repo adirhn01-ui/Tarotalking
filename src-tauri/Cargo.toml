@@ -24,7 +24,7 @@ serde_json = "1"
 thiserror = "2"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 quick-xml = "0.37"
-ureq = "2"
+ureq = { version = "2", features = ["json"] }
 tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 keyring = { version = "3", features = ["windows-native"] }
 # System (Windows) voices via WinRT speech synthesis — WebView2 has no
@@ -37,6 +37,7 @@ windows = { version = "0.61", features = [
     "Foundation_Collections",
 ] }
 sha2 = "0.10"
+base64 = "0.22"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 uuid = { version = "1", features = ["v4"] }
 

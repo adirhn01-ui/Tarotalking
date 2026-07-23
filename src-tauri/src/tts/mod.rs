@@ -2,10 +2,13 @@
 // through the disk cache. Shared shapes live here (mirrored in core/types.ts).
 
 pub mod cache;
+pub mod cartesia;
+pub mod deepgram;
 pub mod edge;
 pub mod eleven;
 pub mod openai;
 pub mod piper;
+pub mod speechify;
 pub mod system;
 
 use crate::error::{AppError, Result};

@@ -3,6 +3,7 @@
 
 import "./bar.css";
 import { getItem } from "../core/library";
+import { navigate } from "../core/nav";
 import { formatTimeLeft, listeningMinutes } from "../core/format";
 import { settingsStore, updatePlaybackPrefs } from "../core/session";
 import { subscribeSelect } from "../core/store";
@@ -132,18 +133,22 @@ export function mountPlayerBar(host: HTMLElement): PlayerBar {
       if (voices.length === 0 && !reason) continue;
       items.push({ label: PROVIDER_LABELS[provider.id], disabled: true, onSelect: () => {} });
       if (voices.length === 0) {
+        // A real action, not gray text: jump straight to the key/setup page.
+        const needsKey = /key/i.test(reason ?? "");
         items.push({
-          label: reason ?? "Unavailable",
-          disabled: true,
-          title: reason,
-          onSelect: () => {},
+          label: `${reason ?? "Unavailable"} →`,
+          title: "Open Settings",
+          onSelect: () =>
+            navigate({ view: "settings", section: needsKey ? "keys" : "voices" }),
         });
         continue;
       }
       for (const v of voices.slice(0, 24)) {
         const active = current?.provider === v.provider && current.id === v.id;
+        // Names like "Ryan (US · high quality)" already carry their region.
+        const suffix = v.locale && !v.name.includes("(") ? `  (${shortLocale(v.locale)})` : "";
         items.push({
-          label: `${active ? "✓ " : "   "}${v.name}${v.locale ? `  (${shortLocale(v.locale)})` : ""}`,
+          label: `${active ? "✓ " : "   "}${v.name}${suffix}`,
           onSelect: () => selectVoice({ provider: v.provider, id: v.id }),
         });
       }

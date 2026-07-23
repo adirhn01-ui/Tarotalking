@@ -90,12 +90,24 @@ export function touchOpened(id: string): void {
   updateItem(id, { lastOpenedAt: Date.now() });
 }
 
-export function setReadingPosition(id: string, pos: Position, progressPct: number): void {
-  updateItem(id, { reading: pos, progressPct });
+export function setReadingPosition(
+  id: string,
+  pos: Position,
+  progressPct: number,
+  chapterLabel?: string,
+): void {
+  updateItem(id, {
+    reading: pos,
+    progressPct,
+    ...(chapterLabel !== undefined ? { chapterLabel } : {}),
+  });
 }
 
-export function setPlaybackPosition(id: string, pos: Position): void {
-  updateItem(id, { playback: pos });
+export function setPlaybackPosition(id: string, pos: Position, chapterLabel?: string): void {
+  updateItem(id, {
+    playback: pos,
+    ...(chapterLabel !== undefined ? { chapterLabel } : {}),
+  });
 }
 
 export function addBookmark(id: string, bm: Bookmark): void {

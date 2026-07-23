@@ -74,6 +74,9 @@ function badgeLabel(item: LibraryItem): string | null {
 }
 
 function subLine(item: LibraryItem): string {
+  // In-progress items show where you left off; untouched/finished ones show
+  // their source (author / site).
+  if (item.chapterLabel && item.progressPct > 0 && !isFinished(item)) return item.chapterLabel;
   if (item.sourceType === "url") return item.sourceUrl ? hostOf(item.sourceUrl) : "Web";
   return item.author ?? "";
 }

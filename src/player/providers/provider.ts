@@ -43,6 +43,9 @@ import { edgeProvider } from "./edge";
 import { piperProvider } from "./piper";
 import { elevenProvider } from "./eleven";
 import { openaiProvider } from "./openai";
+import { speechifyProvider } from "./speechify";
+import { deepgramProvider } from "./deepgram";
+import { cartesiaProvider } from "./cartesia";
 
 const PROVIDERS: Record<ProviderId, TtsProvider> = {
   system: systemProvider,
@@ -50,6 +53,9 @@ const PROVIDERS: Record<ProviderId, TtsProvider> = {
   piper: piperProvider,
   eleven: elevenProvider,
   openai: openaiProvider,
+  speechify: speechifyProvider,
+  deepgram: deepgramProvider,
+  cartesia: cartesiaProvider,
 };
 
 export function getProvider(id: ProviderId): TtsProvider {
@@ -58,5 +64,14 @@ export function getProvider(id: ProviderId): TtsProvider {
 
 /** Display order: free/no-setup first, cloud key last. */
 export function allProviders(): TtsProvider[] {
-  return [edgeProvider, systemProvider, piperProvider, elevenProvider, openaiProvider];
+  return [
+    edgeProvider,
+    systemProvider,
+    piperProvider,
+    elevenProvider,
+    openaiProvider,
+    speechifyProvider,
+    deepgramProvider,
+    cartesiaProvider,
+  ];
 }

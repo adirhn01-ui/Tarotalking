@@ -97,7 +97,13 @@ pub fn synth(voice_id: &str, text: &str, out: &Path) -> Result<()> {
     let model = crate::settings::read_field_str("elevenModel")
         .unwrap_or_else(|| DEFAULT_MODEL.to_string());
 
-    let url = format!("{TTS_BASE}/{voice_id}?output_format=mp3_44100_96");
+    // 128 kbps needs no special tier; 96 is the lighter standard option.
+    let fmt = if crate::tts::cache::audio_quality() == "standard" {
+        "mp3_44100_96"
+    } else {
+        "mp3_44100_128"
+    };
+    let url = format!("{TTS_BASE}/{voice_id}?output_format={fmt}");
     let body = serde_json::to_string(&serde_json::json!({
         "text": text,
         "model_id": model,

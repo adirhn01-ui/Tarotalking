@@ -25,15 +25,25 @@ pub struct CacheStats {
 /// Audio file extension for a provider. Unknown providers have no cache slot.
 fn ext_for(provider: &str) -> Option<&'static str> {
     match provider {
-        "edge" | "eleven" | "openai" => Some("mp3"),
+        "edge" | "eleven" | "openai" | "speechify" | "deepgram" | "cartesia" => Some("mp3"),
         "piper" | "system" => Some("wav"),
         _ => None,
     }
 }
 
-/// Stable 16-hex cache key: xxh3_64 of "provider|voice_id|text".
+/// The user-selected synthesis quality ("standard" | "high"). Part of the
+/// cache key so switching quality re-synthesizes instead of serving stale
+/// lower-bitrate audio.
+pub fn audio_quality() -> String {
+    match crate::settings::read_field_str("audioQuality").as_deref() {
+        Some("standard") => "standard".to_string(),
+        _ => "high".to_string(),
+    }
+}
+
+/// Stable 16-hex cache key: xxh3_64 of "provider|voice_id|quality|text".
 fn cache_key(provider: &str, voice_id: &str, text: &str) -> String {
-    let input = format!("{provider}|{voice_id}|{text}");
+    let input = format!("{provider}|{voice_id}|{}|{text}", audio_quality());
     format!("{:016x}", xxh3_64(input.as_bytes()))
 }
 
@@ -113,6 +123,18 @@ pub fn synth_via_cache(provider: &str, voice_id: &str, text: &str) -> Result<Syn
         }
         "openai" => {
             crate::tts::openai::synth(voice_id, text, &staging)?;
+            Ok(None)
+        }
+        "speechify" => {
+            crate::tts::speechify::synth(voice_id, text, &staging)?;
+            Ok(None)
+        }
+        "deepgram" => {
+            crate::tts::deepgram::synth(voice_id, text, &staging)?;
+            Ok(None)
+        }
+        "cartesia" => {
+            crate::tts::cartesia::synth(voice_id, text, &staging)?;
             Ok(None)
         }
         _ => Err(AppError::msg("Unknown voice provider")),
