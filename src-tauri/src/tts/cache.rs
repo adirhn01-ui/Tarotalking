@@ -25,7 +25,7 @@ pub struct CacheStats {
 /// Audio file extension for a provider. Unknown providers have no cache slot.
 fn ext_for(provider: &str) -> Option<&'static str> {
     match provider {
-        "edge" | "eleven" => Some("mp3"),
+        "edge" | "eleven" | "openai" => Some("mp3"),
         "piper" | "system" => Some("wav"),
         _ => None,
     }
@@ -109,6 +109,10 @@ pub fn synth_via_cache(provider: &str, voice_id: &str, text: &str) -> Result<Syn
         }
         "eleven" => {
             crate::tts::eleven::synth(voice_id, text, &staging)?;
+            Ok(None)
+        }
+        "openai" => {
+            crate::tts::openai::synth(voice_id, text, &staging)?;
             Ok(None)
         }
         _ => Err(AppError::msg("Unknown voice provider")),

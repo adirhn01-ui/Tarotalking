@@ -5,6 +5,7 @@ import {
   buildCharIndex,
   chapterWordCounts,
   pctForPosition,
+  sentenceIndexForOffset,
   splitWordParts,
   topmostBlockIndex,
   widthBucketLabel,
@@ -107,6 +108,38 @@ describe("splitWordParts", () => {
   });
   it("returns an empty word for a zero-length range", () => {
     expect(splitWordParts("Hi", 1, 0)).toEqual({ before: "H", word: "", after: "i" });
+  });
+});
+
+describe("sentenceIndexForOffset", () => {
+  // "Hello world. Second one." → span0 [0,12), span1 [13,24)
+  const two = "Hello world. Second one.";
+
+  it("resolves an offset inside a sentence to that sentence", () => {
+    expect(sentenceIndexForOffset(two, 0)).toBe(0); // 'H'
+    expect(sentenceIndexForOffset(two, 6)).toBe(0); // 'w'
+    expect(sentenceIndexForOffset(two, 11)).toBe(0); // '.'
+    expect(sentenceIndexForOffset(two, 13)).toBe(1); // 'S'
+    expect(sentenceIndexForOffset(two, 23)).toBe(1); // final '.'
+  });
+
+  it("falls back to the nearest sentence when the offset lands in an inter-span gap", () => {
+    // Multi-space gap: "One.   Two." → span0 [0,4), span1 [7,11)
+    const gapped = "One.   Two.";
+    expect(sentenceIndexForOffset(gapped, 4)).toBe(0); // closest to "One."
+    expect(sentenceIndexForOffset(gapped, 6)).toBe(1); // closest to "Two."
+    // Exact tie resolves to the earlier sentence.
+    expect(sentenceIndexForOffset(gapped, 5)).toBe(0);
+  });
+
+  it("clamps out-of-range and leading-whitespace offsets to the nearest sentence", () => {
+    expect(sentenceIndexForOffset(two, 999)).toBe(1); // past the end → last
+    expect(sentenceIndexForOffset("  Hi there.", 0)).toBe(0); // leading gap → first
+  });
+
+  it("returns 0 for text with no sentences", () => {
+    expect(sentenceIndexForOffset("", 0)).toBe(0);
+    expect(sentenceIndexForOffset("   ", 1)).toBe(0);
   });
 });
 

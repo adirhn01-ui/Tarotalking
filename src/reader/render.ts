@@ -91,6 +91,33 @@ export function topmostBlockIndex(offsets: number[], scrollTop: number): number 
   return ans;
 }
 
+/** Map a char offset within a block's full text to the sentence index that
+ *  contains it (click-a-word-to-read resolution). When the offset lands in
+ *  inter-sentence whitespace (a gap between spans, or before the first / past
+ *  the last), fall back to the nearest sentence by interval distance. Uses the
+ *  same splitSentences offsets the engine speaks, so the returned index maps to
+ *  a real playback position. */
+export function sentenceIndexForOffset(blockText: string, charOffset: number): number {
+  const spans = splitSentences(blockText);
+  if (spans.length === 0) return 0;
+  for (let i = 0; i < spans.length; i++) {
+    const s = spans[i]!;
+    if (charOffset >= s.start && charOffset < s.end) return i;
+  }
+  // Gap / out-of-range: pick the span whose [start, end) interval is closest.
+  let best = 0;
+  let bestDist = Infinity;
+  for (let i = 0; i < spans.length; i++) {
+    const s = spans[i]!;
+    const dist = charOffset < s.start ? s.start - charOffset : charOffset - (s.end - 1);
+    if (dist < bestDist) {
+      bestDist = dist;
+      best = i;
+    }
+  }
+  return best;
+}
+
 export interface WordParts {
   before: string;
   word: string;

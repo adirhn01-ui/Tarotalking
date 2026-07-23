@@ -494,31 +494,52 @@
   color: var(--text-2);
 }
 
-.reader-seg {
+.reader-fonts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--sp-2);
+}
+.reader-font {
   display: flex;
-  gap: 2px;
-  padding: 2px;
-  background: var(--bg-input);
+  align-items: baseline;
+  gap: var(--sp-2);
+  min-width: 0;
+  padding: var(--sp-2) var(--sp-3);
   border: 1px solid var(--border);
   border-radius: var(--radius-s);
-}
-.reader-seg button {
-  flex: 1;
-  height: 28px;
-  border: none;
-  border-radius: 6px;
-  background: transparent;
+  background: var(--bg-input);
   color: var(--text-2);
-  font-size: var(--fs-12);
+  text-align: left;
   cursor: pointer;
-  transition: background var(--dur) var(--ease), color var(--dur) var(--ease);
+  transition: background var(--dur) var(--ease), border-color var(--dur) var(--ease),
+    box-shadow var(--dur) var(--ease);
 }
-.reader-seg button[data-font="serif"] {
-  font-family: var(--font-serif);
+.reader-font:hover {
+  background: var(--bg-hover);
 }
-.reader-seg--on {
-  background: var(--bg-active);
+.reader-font__ag {
+  flex: none;
+  font-size: 16px;
+  line-height: 1.1;
   color: var(--text-1);
+}
+.reader-font__label {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-ui);
+  font-size: var(--fs-11);
+  color: var(--text-3);
+}
+.reader-font--on {
+  border-color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent);
+  color: var(--text-1);
+}
+.reader-font--on .reader-font__label {
+  color: var(--text-2);
 }
 
 .reader-step {

@@ -15,9 +15,12 @@ import {
   downloadPct,
   formatMB,
   isHighQuality,
+  localeShortBadge,
   piperModelTask,
   piperTaskBase,
   PIPER_BINARY_TASK,
+  previewCostsCredits,
+  previewSampleText,
   qualityLabel,
   taskMatches,
 } from "./voices";
@@ -124,6 +127,36 @@ describe("downloadPct", () => {
   it("is indeterminate without a known total", () => {
     expect(downloadPct(0, null)).toBeNull();
     expect(downloadPct(3, 0)).toBeNull();
+  });
+});
+
+describe("localeShortBadge", () => {
+  it("extracts a 2-letter region subtag, uppercased", () => {
+    expect(localeShortBadge("en-US")).toBe("US");
+    expect(localeShortBadge("en_GB")).toBe("GB");
+    expect(localeShortBadge("pt-br")).toBe("BR");
+  });
+  it("is empty without a usable region", () => {
+    expect(localeShortBadge("en")).toBe("");
+    expect(localeShortBadge("")).toBe("");
+    expect(localeShortBadge(undefined)).toBe("");
+    expect(localeShortBadge("en-Latn")).toBe("");
+  });
+});
+
+describe("previewSampleText", () => {
+  it("greets in the voice's own name", () => {
+    expect(previewSampleText("Aria")).toBe("Hi, I'm Aria. This is how I sound in Tarotalking.");
+  });
+});
+
+describe("previewCostsCredits", () => {
+  it("is true only for the paid cloud providers", () => {
+    expect(previewCostsCredits("eleven")).toBe(true);
+    expect(previewCostsCredits("openai")).toBe(true);
+    expect(previewCostsCredits("edge")).toBe(false);
+    expect(previewCostsCredits("system")).toBe(false);
+    expect(previewCostsCredits("piper")).toBe(false);
   });
 });
 

@@ -153,7 +153,8 @@ export function mountPlayerBar(host: HTMLElement): PlayerBar {
       toast.error("No voices available — check Settings → Voices");
       return;
     }
-    showMenu(r.left, Math.max(8, r.top - Math.min(480, items.length * 30) - 8), items);
+    // Menu height is CSS-capped at min(420px, 70vh) and scrolls internally.
+    showMenu(r.left, Math.max(8, r.top - Math.min(420, items.length * 30) - 8), items);
     renderVoiceName();
   }
 

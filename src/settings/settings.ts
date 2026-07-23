@@ -20,7 +20,7 @@ import {
 } from "../core/session";
 import { chordOf, findConflicts, normalizeChord } from "../core/shortcuts";
 import type { ActionId, ReaderTheme, Settings } from "../core/types";
-import { ACTION_LABELS, DEFAULT_SHORTCUTS, PLAYBACK_RATES } from "../core/types";
+import { ACTION_LABELS, DEFAULT_SHORTCUTS, PLAYBACK_RATES, READER_FONTS } from "../core/types";
 import { invalidateElevenVoices } from "../player/providers/eleven";
 import { trapTab } from "../ui/focus";
 import { icon } from "../ui/icons";
@@ -193,10 +193,27 @@ const SECTIONS: { id: string; label: string; icon: string }[] = [
   { id: "voices", label: "Voices", icon: icon.mic },
   { id: "keys", label: "API keys", icon: icon.key },
   { id: "shortcuts", label: "Shortcuts", icon: icon.keyboard },
-  { id: "storage", label: "Storage & privacy", icon: icon.shield },
+  { id: "storage", label: "Storage", icon: icon.shield },
   { id: "about", label: "About", icon: icon.info },
 ];
 const SECTION_IDS = new Set(SECTIONS.map((s) => s.id));
+
+type KeyProviderId = "eleven" | "openai";
+
+const KEY_PROVIDERS: { id: KeyProviderId; label: string; placeholder: string; desc: string }[] = [
+  {
+    id: "eleven",
+    label: "ElevenLabs",
+    placeholder: "ElevenLabs API key",
+    desc: "Your custom and premium ElevenLabs voices",
+  },
+  {
+    id: "openai",
+    label: "OpenAI",
+    placeholder: "OpenAI API key",
+    desc: "Alloy, Nova, Shimmer and the other OpenAI voices",
+  },
+];
 
 const READER_THEMES: { id: ReaderTheme; label: string; bg: string; text: string }[] = [
   { id: "default", label: "Default", bg: "var(--page-bg)", text: "var(--page-text)" },
@@ -269,6 +286,19 @@ function segHtml(
     .join("")}</div>`;
 }
 
+function fontGridHtml(activeId: string): string {
+  // "serif" and "sans" are valid ids in READER_FONTS (the legacy defaults), so
+  // an exact id match is all we need to light the active card.
+  const cards = READER_FONTS.map((f) => {
+    const active = f.id === activeId;
+    return `<button type="button" class="set-font-card ${active ? "set-font-card--active" : ""}" data-font="${escapeHtml(f.id)}" title="${escapeHtml(f.label)}" aria-pressed="${active}">
+      <span class="set-font-card__ag" style="font-family: ${f.stack}">Ag</span>
+      <span class="set-font-card__label">${escapeHtml(f.label)}</span>
+    </button>`;
+  }).join("");
+  return `<div class="set-font-grid">${cards}</div>`;
+}
+
 function swatchesHtml(active: ReaderTheme): string {
   return `<div class="set-swatches">${READER_THEMES.map(
     (t) => `<button type="button" class="set-swatch ${t.id === active ? "set-swatch--active" : ""}" data-rtheme="${t.id}" title="${escapeHtml(t.label)}" aria-label="${escapeHtml(t.label)}" aria-pressed="${t.id === active}">
@@ -279,16 +309,6 @@ function swatchesHtml(active: ReaderTheme): string {
       <span class="set-swatch__label">${escapeHtml(t.label)}</span>
     </button>`,
   ).join("")}</div>`;
-}
-
-function staticRow(iconSvg: string, label: string, desc: string): string {
-  return `<div class="set-row set-static-row">
-    <span class="set-static-row__icon">${iconSvg}</span>
-    <div class="set-row__text">
-      <div class="set-row__label">${escapeHtml(label)}</div>
-      <div class="set-row__desc">${escapeHtml(desc)}</div>
-    </div>
-  </div>`;
 }
 
 /* ================= mount ================= */
@@ -328,8 +348,10 @@ export function mountSettings(el: HTMLElement, section?: string): SettingsView {
   // Async, section-scoped state.
   let cacheStats: CacheStats | null = null;
   let cacheStatsError = false;
-  let hasElevenKey: boolean | null = null;
-  let keyReplacing = false;
+  // API keys, per provider: presence (null = still checking) and whether the
+  // row is in "replace" (input) mode.
+  const hasKey: Record<KeyProviderId, boolean | null> = { eleven: null, openai: null };
+  const keyReplacing: Record<KeyProviderId, boolean> = { eleven: false, openai: false };
 
   // Shortcut-capture state (kept out of render so re-renders don't drop it).
   let capturing: ActionId | null = null;
@@ -370,13 +392,10 @@ export function mountSettings(el: HTMLElement, section?: string): SettingsView {
   function readerHtml(s: Settings): string {
     const r = s.reader;
     const text =
-      rowHtml(
-        "Font",
-        selectHtml("r-font", r.font === "sans" ? "sans" : "serif", [
-          { value: "serif", label: "Serif" },
-          { value: "sans", label: "Sans" },
-        ]),
-      ) +
+      `<div class="set-row set-row--stack">
+        <div class="set-row__label">Font</div>
+        ${fontGridHtml(r.font)}
+      </div>` +
       rowHtml("Text size", sliderHtml("r-size", 13, 30, 1, r.fontSize, `${r.fontSize}px`)) +
       rowHtml(
         "Line spacing",
@@ -437,23 +456,29 @@ export function mountSettings(el: HTMLElement, section?: string): SettingsView {
     );
   }
 
-  function keysHtml(): string {
-    let control: string;
-    if (hasElevenKey === null) {
-      control = `<span class="faint">Checking…</span>`;
-    } else if (hasElevenKey && !keyReplacing) {
-      control = `<span class="set-key-mask mono">••••••••</span>
-        <button type="button" class="btn btn--sm" id="k-replace">Replace</button>
-        <button type="button" class="btn btn--sm btn--ghost" id="k-remove">Remove</button>`;
-    } else {
-      control = `<input type="password" class="input set-key-input" id="k-input" placeholder="ElevenLabs API key" autocomplete="off" spellcheck="false" />
-        <button type="button" class="btn btn--sm btn--primary" id="k-save">Save</button>
-        ${hasElevenKey ? `<button type="button" class="btn btn--sm btn--ghost" id="k-cancel">Cancel</button>` : ""}`;
+  function keyControlHtml(p: KeyProviderId, placeholder: string): string {
+    const present = hasKey[p];
+    if (present === null) {
+      return `<span class="faint">Checking…</span>`;
     }
+    if (present && !keyReplacing[p]) {
+      return `<span class="set-key-mask mono">••••••••</span>
+        <button type="button" class="btn btn--sm" data-k-replace="${p}">Replace</button>
+        <button type="button" class="btn btn--sm btn--ghost" data-k-remove="${p}">Remove</button>`;
+    }
+    return `<input type="password" class="input set-key-input" data-k-input="${p}" placeholder="${escapeHtml(placeholder)}" autocomplete="off" spellcheck="false" />
+      <button type="button" class="btn btn--sm btn--primary" data-k-save="${p}">Save</button>
+      ${present ? `<button type="button" class="btn btn--sm btn--ghost" data-k-cancel="${p}">Cancel</button>` : ""}`;
+  }
+
+  function keysHtml(): string {
+    const groups = KEY_PROVIDERS.map((kp) =>
+      groupHtml(kp.label, rowHtml("API key", keyControlHtml(kp.id, kp.placeholder), kp.desc)),
+    ).join("");
     return (
       `<div class="set__title">API keys</div>
       <p class="set__lead">Keys are stored in Windows Credential Manager, never in files or logs, and never leave this computer except to call the provider.</p>` +
-      groupHtml("ElevenLabs", rowHtml("API key", control))
+      groups
     );
   }
 
@@ -519,25 +544,15 @@ export function mountSettings(el: HTMLElement, section?: string): SettingsView {
           "Delete all synthesized audio. It is re-created as you listen.",
         ),
     );
-    const privacyGroup = groupHtml(
-      "Privacy",
-      staticRow(icon.shield, "No telemetry", "Tarotalking sends nothing about you anywhere.") +
-        staticRow(
-          icon.globe,
-          "Direct fetches",
-          "Web articles are fetched directly from the site you enter.",
-        ) +
-        staticRow(
-          icon.folder,
-          "Local library",
-          "Your library lives on this PC, in %APPDATA%\\Tarotalking.",
-        ),
-    );
     const dataGroup = groupHtml(
       "Data",
-      rowHtml("Data folder", `<span class="set-path mono">%APPDATA%\\Tarotalking</span>`),
+      rowHtml(
+        "Data folder",
+        `<span class="set-path mono">%APPDATA%\\Tarotalking</span>`,
+        "Library, imported content, and settings",
+      ),
     );
-    return `<div class="set__title">Storage & privacy</div>` + cacheGroup + privacyGroup + dataGroup;
+    return `<div class="set__title">Storage</div>` + cacheGroup + dataGroup;
   }
 
   function aboutHtml(): string {
@@ -605,8 +620,8 @@ export function mountSettings(el: HTMLElement, section?: string): SettingsView {
   }
 
   function wireReader(): void {
-    inner.querySelector<HTMLSelectElement>("#r-font")?.addEventListener("change", (e) => {
-      updateReaderPrefs({ font: (e.target as HTMLSelectElement).value });
+    inner.querySelectorAll<HTMLButtonElement>("[data-font]").forEach((btn) => {
+      btn.addEventListener("click", () => updateReaderPrefs({ font: btn.dataset.font! }));
     });
     bindSlider("r-size", (v) => `${v}px`, (v) => updateReaderPrefs({ fontSize: v }));
     bindSlider("r-leading", (v) => v.toFixed(1), (v) => updateReaderPrefs({ lineHeight: v }));
@@ -662,55 +677,74 @@ export function mountSettings(el: HTMLElement, section?: string): SettingsView {
   /* ---------------- API keys ---------------- */
 
   async function loadHasKey(): Promise<void> {
-    try {
-      const has = await ipc.hasKey("eleven");
-      hasElevenKey = has;
-    } catch {
-      hasElevenKey = false;
-    }
+    await Promise.all(
+      KEY_PROVIDERS.map(async (kp) => {
+        try {
+          hasKey[kp.id] = await ipc.hasKey(kp.id);
+        } catch {
+          hasKey[kp.id] = false;
+        }
+      }),
+    );
     if (active === "keys") renderSimple("keys");
   }
 
   function wireKeys(): void {
-    inner.querySelector<HTMLButtonElement>("#k-replace")?.addEventListener("click", () => {
-      keyReplacing = true;
-      renderSimple("keys");
-    });
-    inner.querySelector<HTMLButtonElement>("#k-cancel")?.addEventListener("click", () => {
-      keyReplacing = false;
-      renderSimple("keys");
-    });
-    inner.querySelector<HTMLButtonElement>("#k-remove")?.addEventListener("click", () => {
-      confirmModal({
-        title: "Remove API key?",
-        message: "Tarotalking will no longer be able to use your ElevenLabs voices until you add a key again.",
-        confirmLabel: "Remove key",
-        danger: true,
-        onConfirm: () => void removeKey(),
+    inner.querySelectorAll<HTMLButtonElement>("[data-k-replace]").forEach((btn) => {
+      const p = btn.dataset.kReplace as KeyProviderId;
+      btn.addEventListener("click", () => {
+        keyReplacing[p] = true;
+        renderSimple("keys");
       });
     });
-    const input = inner.querySelector<HTMLInputElement>("#k-input");
-    const save = (): void => void saveKey(input?.value ?? "");
-    inner.querySelector<HTMLButtonElement>("#k-save")?.addEventListener("click", save);
-    input?.addEventListener("keydown", (e) => {
-      if (e.key === "Enter") {
-        e.preventDefault();
-        save();
-      }
+    inner.querySelectorAll<HTMLButtonElement>("[data-k-cancel]").forEach((btn) => {
+      const p = btn.dataset.kCancel as KeyProviderId;
+      btn.addEventListener("click", () => {
+        keyReplacing[p] = false;
+        renderSimple("keys");
+      });
+    });
+    inner.querySelectorAll<HTMLButtonElement>("[data-k-remove]").forEach((btn) => {
+      const p = btn.dataset.kRemove as KeyProviderId;
+      const label = KEY_PROVIDERS.find((k) => k.id === p)!.label;
+      btn.addEventListener("click", () => {
+        confirmModal({
+          title: "Remove API key?",
+          message: `Tarotalking will no longer be able to use your ${label} voices until you add a key again.`,
+          confirmLabel: "Remove key",
+          danger: true,
+          onConfirm: () => void removeKey(p),
+        });
+      });
+    });
+    inner.querySelectorAll<HTMLInputElement>("[data-k-input]").forEach((input) => {
+      const p = input.dataset.kInput as KeyProviderId;
+      const save = (): void => void saveKey(p, input.value);
+      inner
+        .querySelector<HTMLButtonElement>(`[data-k-save="${p}"]`)
+        ?.addEventListener("click", save);
+      input.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          save();
+        }
+      });
     });
   }
 
-  async function saveKey(raw: string): Promise<void> {
+  async function saveKey(provider: KeyProviderId, raw: string): Promise<void> {
     const value = raw.trim();
     if (!value) {
       toast.error("Enter an API key first.");
       return;
     }
     try {
-      await ipc.setKey("eleven", value);
-      invalidateElevenVoices();
-      hasElevenKey = true;
-      keyReplacing = false;
+      await ipc.setKey(provider, value);
+      // ElevenLabs voices are fetched over the network and cached; OpenAI's are
+      // a static list, so only ElevenLabs needs its cache dropped.
+      if (provider === "eleven") invalidateElevenVoices();
+      hasKey[provider] = true;
+      keyReplacing[provider] = false;
       if (active === "keys") renderSimple("keys");
       toast.info("Key saved");
     } catch (e) {
@@ -718,12 +752,12 @@ export function mountSettings(el: HTMLElement, section?: string): SettingsView {
     }
   }
 
-  async function removeKey(): Promise<void> {
+  async function removeKey(provider: KeyProviderId): Promise<void> {
     try {
-      await ipc.deleteKey("eleven");
-      invalidateElevenVoices();
-      hasElevenKey = false;
-      keyReplacing = false;
+      await ipc.deleteKey(provider);
+      if (provider === "eleven") invalidateElevenVoices();
+      hasKey[provider] = false;
+      keyReplacing[provider] = false;
       if (active === "keys") renderSimple("keys");
       toast.info("Key removed");
     } catch (e) {
@@ -836,7 +870,8 @@ export function mountSettings(el: HTMLElement, section?: string): SettingsView {
       voicesDispose = null;
     }
     endCapture();
-    keyReplacing = false;
+    keyReplacing.eleven = false;
+    keyReplacing.openai = false;
     active = id;
     updateSidebar();
     content.scrollTop = 0;
@@ -854,7 +889,8 @@ export function mountSettings(el: HTMLElement, section?: string): SettingsView {
       cacheStatsError = false;
       void loadCacheStats();
     } else if (id === "keys") {
-      hasElevenKey = null;
+      hasKey.eleven = null;
+      hasKey.openai = null;
       void loadHasKey();
     }
   }

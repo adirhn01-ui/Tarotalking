@@ -31,31 +31,53 @@ function inRoundedSquare(x, y) {
   return Math.hypot(dx, dy) <= R;
 }
 
-// Bold "T": horizontal bar + stem, sized against the 1024 canvas.
-const BAR = { x0: 190, x1: 580, y0: 300, y1: 420 };
-const STEM = { x0: 325, x1: 445, y0: 300, y1: 780 };
+// The "T as an open book": the crossbar is the two open pages (slanting
+// gently down toward the center, the way page tops dip into the spine) and
+// the stem is the book's spine. Page-edge accents under each arm suggest the
+// page stack. Reads as a bold T at a glance, as an open book on a look.
+// The app's own bookOpen glyph, scaled up: an OUTLINE open book whose center
+// spine descends below the pages — reading as a "T". Drawn as round-capped
+// strokes (distance-to-segment test), matching the in-app icon style.
+const STROKE_HALF = 30; // stroke width 60 at 1024
 
-function inT(x, y) {
-  if (x >= BAR.x0 && x < BAR.x1 && y >= BAR.y0 && y < BAR.y1) return true;
-  if (x >= STEM.x0 && x < STEM.x1 && y >= STEM.y0 && y < STEM.y1) return true;
-  return false;
+// Each entry is a polyline; round caps/joins come free from distance math.
+const LEFT_PAGE = [
+  [245, 300], [412, 300], [496, 332], // top edge, bending into the spine
+];
+const LEFT_SIDE = [
+  [245, 300], [245, 686], // outer edge
+];
+const LEFT_BOTTOM = [
+  [245, 686], [412, 686], [496, 718], // bottom edge, bending into the spine
+];
+const SPINE = [
+  [512, 332], [512, 772], // the "T" stem, dropping below the page bottoms
+];
+
+function mirror(poly) {
+  return poly.map(([x, y]) => [1024 - x, y]);
 }
 
-// Two speaker arcs to the right of the T, rounded caps.
-const ARC = { cx: 610, cy: 540, radii: [130, 215], half: 29, angle: (55 * Math.PI) / 180 };
+const POLYLINES = [
+  LEFT_PAGE, LEFT_SIDE, LEFT_BOTTOM,
+  mirror(LEFT_PAGE), mirror(LEFT_SIDE), mirror(LEFT_BOTTOM),
+  SPINE,
+];
 
-function inArcs(x, y) {
-  const dx = x - ARC.cx;
-  const dy = y - ARC.cy;
-  const d = Math.hypot(dx, dy);
-  const a = Math.atan2(dy, dx); // 0 = pointing right
-  for (const r of ARC.radii) {
-    if (Math.abs(d - r) <= ARC.half && Math.abs(a) <= ARC.angle) return true;
-    // rounded caps at the angular ends
-    for (const sgn of [-1, 1]) {
-      const ex = ARC.cx + r * Math.cos(sgn * ARC.angle);
-      const ey = ARC.cy + r * Math.sin(sgn * ARC.angle);
-      if (Math.hypot(x - ex, y - ey) <= ARC.half) return true;
+function distToSegment(px, py, ax, ay, bx, by) {
+  const dx = bx - ax;
+  const dy = by - ay;
+  const len2 = dx * dx + dy * dy;
+  const t = len2 === 0 ? 0 : Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / len2));
+  return Math.hypot(px - (ax + t * dx), py - (ay + t * dy));
+}
+
+function inGlyph(x, y) {
+  for (const poly of POLYLINES) {
+    for (let i = 0; i + 1 < poly.length; i++) {
+      const [ax, ay] = poly[i];
+      const [bx, by] = poly[i + 1];
+      if (distToSegment(x, y, ax, ay, bx, by) <= STROKE_HALF) return true;
     }
   }
   return false;
@@ -82,7 +104,7 @@ for (let y = 0; y < S; y++) {
       const sy = y + oy;
       if (inRoundedSquare(sx, sy)) {
         cover++;
-        if (inT(sx, sy) || inArcs(sx, sy)) glyph++;
+        if (inGlyph(sx, sy)) glyph++;
       }
     }
     const a = (cover / 4) * 255;

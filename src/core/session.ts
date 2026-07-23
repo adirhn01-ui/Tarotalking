@@ -40,7 +40,11 @@ function sanitizeVoice(v: unknown): VoiceRef | null {
   const provider = o.provider;
   const id = o.id;
   if (
-    (provider === "system" || provider === "edge" || provider === "piper" || provider === "eleven") &&
+    (provider === "system" ||
+      provider === "edge" ||
+      provider === "piper" ||
+      provider === "eleven" ||
+      provider === "openai") &&
     typeof id === "string" &&
     id.length > 0
   ) {

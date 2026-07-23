@@ -4,13 +4,14 @@
 // download / progress / remove, wired to piperInstall* / piperRemove* with live
 // progress from the download-progress event.
 
+import { convertFileSrc } from "@tauri-apps/api/core";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 import { escapeHtml } from "../core/format";
 import { describeError, ipc, onDownloadProgress, type DownloadProgress } from "../core/ipc";
 import { settingsStore, updatePlaybackPrefs } from "../core/session";
 import { subscribeSelect } from "../core/store";
 import { PROVIDER_LABELS } from "../core/types";
-import type { PiperStatus, VoiceInfo, VoiceRef } from "../core/types";
+import type { PiperStatus, ProviderId, VoiceInfo, VoiceRef } from "../core/types";
 import {
   allProviders,
   getProvider,
@@ -86,6 +87,25 @@ export function downloadPct(received: number, total: number | null): number | nu
   return Math.max(0, Math.min(100, (received / total) * 100));
 }
 
+/** Short region badge from a BCP-47-ish locale ("en-US" → "US", "en_GB" →
+ *  "GB"). Empty when there's no 2-letter region subtag. */
+export function localeShortBadge(locale?: string): string {
+  if (!locale) return "";
+  const parts = locale.replace(/_/g, "-").split("-");
+  const region = parts.length > 1 ? parts[parts.length - 1]! : "";
+  return /^[A-Za-z]{2}$/.test(region) ? region.toUpperCase() : "";
+}
+
+/** The short sample a voice reads when you press its preview button. */
+export function previewSampleText(name: string): string {
+  return `Hi, I'm ${name}. This is how I sound in Tarotalking.`;
+}
+
+/** Providers whose previews spend the user's own API credits. */
+export function previewCostsCredits(provider: ProviderId): boolean {
+  return provider === "eleven" || provider === "openai";
+}
+
 /* ================= descriptions ================= */
 
 const PROVIDER_DESC: Record<string, string> = {
@@ -93,6 +113,7 @@ const PROVIDER_DESC: Record<string, string> = {
   system: "Voices installed in Windows. Always available, fully offline.",
   piper: "Downloadable neural voices that run fully offline on your PC.",
   eleven: "Your ElevenLabs voices via your API key.",
+  openai: "OpenAI voices via your API key. Requires internet.",
 };
 
 /* ================= mount ================= */
@@ -109,6 +130,16 @@ export function mountVoices(container: HTMLElement, ctx: VoicesCtx): { dispose()
 
   // Default-voice display.
   let defaultVoiceName: string | null = null;
+
+  // Voice-list cache, for the mount's lifetime (avoids re-fetching a
+  // provider's catalog every time its card repaints).
+  const voiceCache = new Map<ProviderId, VoiceInfo[]>();
+
+  // Preview playback — only ever one at a time.
+  let preview:
+    | { provider: ProviderId; voiceId: string; phase: "synth" | "playing"; audio: HTMLAudioElement | null }
+    | null = null;
+  let previewToken = 0;
 
   let chooser: ModalHandle | null = null;
 
@@ -183,39 +214,198 @@ export function mountVoices(container: HTMLElement, ctx: VoicesCtx): { dispose()
   }
 
   function buildInfoCard(card: HTMLElement, provider: TtsProvider): void {
-    const withCount = provider.id === "edge";
-    const manageKey = provider.id === "eleven";
     card.innerHTML = `
       ${providerHeaderHtml(provider.label)}
-      <div class="set-provider-desc">${escapeHtml(PROVIDER_DESC[provider.id] ?? "")}${
-        withCount ? ` <span class="set-provider-count" data-count></span>` : ""
-      }</div>
-      ${manageKey ? `<div class="set-provider-actions"><button type="button" class="btn btn--sm btn--ghost" data-managekey>Manage key</button></div>` : ""}`;
+      <div class="set-provider-desc">${escapeHtml(PROVIDER_DESC[provider.id] ?? "")}</div>
+      <div class="set-voice-slot" data-voice-slot>
+        <div class="set-voice-loading">${icon.refresh}<span>Loading voices…</span></div>
+      </div>`;
 
     const chip = card.querySelector<HTMLElement>("[data-chip]")!;
+    const slot = card.querySelector<HTMLElement>("[data-voice-slot]")!;
     void provider
       .availability()
       .then((av) => {
-        if (!disposed) applyChip(chip, av);
+        if (disposed) return;
+        applyChip(chip, av);
+        if (av.ok) void loadVoiceList(provider, slot);
+        else renderUnavailable(slot, provider, av.reason);
       })
       .catch(() => {
-        if (!disposed) applyChip(chip, { ok: false, reason: "Unavailable" });
+        if (disposed) return;
+        applyChip(chip, { ok: false, reason: "Unavailable" });
+        renderUnavailable(slot, provider, "Unavailable");
       });
+  }
 
-    if (withCount) {
-      void provider
-        .voices()
-        .then((vs) => {
-          if (disposed) return;
-          const el = card.querySelector<HTMLElement>("[data-count]");
-          if (el) el.textContent = `· ${vs.length} ${vs.length === 1 ? "voice" : "voices"}`;
-        })
-        .catch(() => {});
+  function renderUnavailable(
+    slot: HTMLElement,
+    provider: TtsProvider,
+    reason: string | undefined,
+  ): void {
+    const addKey =
+      provider.id === "eleven" || provider.id === "openai"
+        ? `<button type="button" class="btn btn--sm btn--ghost" data-addkey>Add key</button>`
+        : "";
+    slot.innerHTML = `<div class="set-voice-unavailable">
+      <span class="set-voice-reason">${escapeHtml(reason ?? "Unavailable")}</span>
+      ${addKey}
+    </div>`;
+    slot
+      .querySelector<HTMLButtonElement>("[data-addkey]")
+      ?.addEventListener("click", () => ctx.goToSection("keys"));
+  }
+
+  async function getVoices(provider: TtsProvider): Promise<VoiceInfo[]> {
+    const cached = voiceCache.get(provider.id);
+    if (cached) return cached;
+    const vs = await provider.voices();
+    voiceCache.set(provider.id, vs);
+    return vs;
+  }
+
+  async function loadVoiceList(provider: TtsProvider, slot: HTMLElement): Promise<void> {
+    try {
+      const voices = await getVoices(provider);
+      if (disposed || !slot.isConnected) return;
+      if (voices.length === 0) {
+        slot.innerHTML = `<div class="set-voice-reason">No voices available.</div>`;
+        return;
+      }
+      renderVoiceRows(slot, provider.id, voices);
+    } catch {
+      if (!disposed && slot.isConnected) {
+        slot.innerHTML = `<div class="set-voice-reason">Couldn't load voices.</div>`;
+      }
     }
-    if (manageKey) {
-      card
-        .querySelector<HTMLButtonElement>("[data-managekey]")
-        ?.addEventListener("click", () => ctx.goToSection("keys"));
+  }
+
+  function voiceRowHtml(provider: ProviderId, v: VoiceInfo, isDefault: boolean): string {
+    const badge = localeShortBadge(v.locale);
+    return `<div class="set-voice-row ${isDefault ? "is-default" : ""}" role="button" tabindex="0"
+        data-set-voice="${escapeHtml(v.id)}" data-voice-provider="${provider}"
+        title="Set as default voice" aria-label="Set ${escapeHtml(v.name)} as default voice">
+      <span class="set-voice-row__name">${escapeHtml(v.name)}</span>
+      ${badge ? `<span class="badge set-voice-row__badge">${escapeHtml(badge)}</span>` : ""}
+      ${v.gender ? `<span class="set-voice-row__gender">${escapeHtml(v.gender)}</span>` : ""}
+      <span class="set-voice-row__spacer"></span>
+      <span class="set-voice-row__check">${isDefault ? icon.check : ""}</span>
+      <button type="button" class="btn btn--sm btn--icon btn--ghost set-voice-row__preview"
+        data-preview-voice="${escapeHtml(v.id)}" data-preview-provider="${provider}"
+        title="Preview voice" aria-label="Preview ${escapeHtml(v.name)}">${icon.play}</button>
+    </div>`;
+  }
+
+  function renderVoiceRows(slot: HTMLElement, provider: ProviderId, voices: VoiceInfo[]): void {
+    const cur = settingsStore.get().playback.voice;
+    const rows = voices
+      .map((v) => voiceRowHtml(provider, v, cur?.provider === provider && cur.id === v.id))
+      .join("");
+    const note = previewCostsCredits(provider)
+      ? `<div class="set-voice-credits">Previews use your API credits.</div>`
+      : "";
+    slot.innerHTML = `<div class="set-voice-list">${rows}</div>${note}`;
+
+    slot.querySelectorAll<HTMLElement>(".set-voice-row").forEach((row) => {
+      const id = row.dataset.setVoice!;
+      const v = voices.find((x) => x.id === id);
+      const setDefault = (): void => {
+        if (!v) return;
+        defaultVoiceName = v.name;
+        updatePlaybackPrefs({ voice: { provider, id } });
+      };
+      row.addEventListener("click", setDefault);
+      row.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          setDefault();
+        }
+      });
+      const prev = row.querySelector<HTMLButtonElement>(".set-voice-row__preview");
+      prev?.addEventListener("click", (e) => {
+        e.stopPropagation();
+        if (v) void togglePreview(provider, v);
+      });
+    });
+    paintPreview();
+  }
+
+  /* ---------------- preview playback ---------------- */
+
+  function paintDefault(): void {
+    const cur = settingsStore.get().playback.voice;
+    container.querySelectorAll<HTMLElement>("[data-set-voice]").forEach((row) => {
+      const isDef =
+        !!cur && cur.provider === row.dataset.voiceProvider && cur.id === row.dataset.setVoice;
+      row.classList.toggle("is-default", isDef);
+      const check = row.querySelector<HTMLElement>(".set-voice-row__check");
+      if (check) check.innerHTML = isDef ? icon.check : "";
+    });
+  }
+
+  function paintPreview(): void {
+    container.querySelectorAll<HTMLButtonElement>("[data-preview-voice]").forEach((btn) => {
+      const active =
+        !!preview &&
+        preview.provider === btn.dataset.previewProvider &&
+        preview.voiceId === btn.dataset.previewVoice;
+      if (!active) {
+        btn.innerHTML = icon.play;
+        btn.title = "Preview voice";
+      } else if (preview!.phase === "synth") {
+        btn.innerHTML = icon.refresh;
+        btn.firstElementChild?.classList.add("spin");
+        btn.title = "Stop preview";
+      } else {
+        btn.innerHTML = icon.pause;
+        btn.title = "Stop preview";
+      }
+    });
+  }
+
+  function stopPreview(): void {
+    if (!preview) return;
+    if (preview.audio) {
+      preview.audio.pause();
+      preview.audio.src = "";
+    }
+    preview = null;
+    previewToken++;
+    paintPreview();
+  }
+
+  async function togglePreview(provider: ProviderId, v: VoiceInfo): Promise<void> {
+    // Clicking the currently-previewing voice (synthesizing or playing) stops it.
+    if (preview && preview.provider === provider && preview.voiceId === v.id) {
+      stopPreview();
+      return;
+    }
+    stopPreview();
+    const token = ++previewToken;
+    preview = { provider, voiceId: v.id, phase: "synth", audio: null };
+    paintPreview();
+    try {
+      const res = await ipc.synth(provider, v.id, previewSampleText(v.name));
+      if (disposed || token !== previewToken) return; // superseded/stopped
+      const audio = new Audio(convertFileSrc(res.path));
+      audio.volume = settingsStore.get().playback.volume;
+      audio.addEventListener("ended", () => {
+        if (token === previewToken) stopPreview();
+      });
+      audio.addEventListener("error", () => {
+        if (token !== previewToken) return;
+        toast.error("Couldn't play the preview.");
+        stopPreview();
+      });
+      preview.audio = audio;
+      preview.phase = "playing";
+      paintPreview();
+      await audio.play();
+    } catch (e) {
+      if (token === previewToken) {
+        toast.error(describeError(e));
+        stopPreview();
+      }
     }
   }
 
@@ -253,14 +443,22 @@ export function mountVoices(container: HTMLElement, ctx: VoicesCtx): { dispose()
       <div class="set-model-name">${escapeHtml(m.name)} ${badge}</div>
       <div class="set-model-meta">${escapeHtml(m.locale)} · ${escapeHtml(formatMB(m.sizeMB))}</div>
     </div>`;
-    let ctrl: string;
+    // Installed models double as pickable voices: whole row sets the default,
+    // with an inline preview button (uninstalled rows keep Download only).
     if (dl) {
-      ctrl = progressCtrlHtml(base, dl);
-    } else if (m.installed) {
-      ctrl = `<div class="set-model-ctrl"><span class="set-model-installed" title="Installed">${icon.check}</span><button type="button" class="btn btn--sm btn--ghost set-danger-hover" data-model-remove="${escapeHtml(m.id)}">Remove</button></div>`;
-    } else {
-      ctrl = `<div class="set-model-ctrl"><button type="button" class="btn btn--sm" data-model-dl="${escapeHtml(m.id)}" ${binaryInstalled ? "" : 'disabled title="Download the voice engine first"'}>${icon.download}Download</button></div>`;
+      return `<div class="set-model-row">${info}${progressCtrlHtml(base, dl)}</div>`;
     }
+    if (m.installed) {
+      const cur = settingsStore.get().playback.voice;
+      const isDefault = cur?.provider === "piper" && cur.id === m.id;
+      const ctrl = `<div class="set-model-ctrl">
+        <button type="button" class="btn btn--sm btn--icon btn--ghost set-voice-row__preview" data-preview-voice="${escapeHtml(m.id)}" data-preview-provider="piper" title="Preview voice" aria-label="Preview ${escapeHtml(m.name)}">${icon.play}</button>
+        <span class="set-model-installed" title="Installed">${icon.check}</span>
+        <button type="button" class="btn btn--sm btn--ghost set-danger-hover" data-model-remove="${escapeHtml(m.id)}">Remove</button>
+      </div>`;
+      return `<div class="set-model-row set-model-row--pick ${isDefault ? "is-default" : ""}" role="button" tabindex="0" data-set-voice="${escapeHtml(m.id)}" data-voice-provider="piper" title="Set as default voice" aria-label="Set ${escapeHtml(m.name)} as default voice">${info}${ctrl}</div>`;
+    }
+    const ctrl = `<div class="set-model-ctrl"><button type="button" class="btn btn--sm" data-model-dl="${escapeHtml(m.id)}" ${binaryInstalled ? "" : 'disabled title="Download the voice engine first"'}>${icon.download}Download</button></div>`;
     return `<div class="set-model-row">${info}${ctrl}</div>`;
   }
 
@@ -317,8 +515,34 @@ export function mountVoices(container: HTMLElement, ctx: VoicesCtx): { dispose()
     });
     card.querySelectorAll<HTMLButtonElement>("[data-model-remove]").forEach((btn) => {
       const id = btn.dataset.modelRemove!;
-      btn.addEventListener("click", () => void removeModel(id));
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        void removeModel(id);
+      });
     });
+    // Installed models: whole row picks the default voice; preview button plays a sample.
+    card.querySelectorAll<HTMLElement>(".set-model-row--pick").forEach((row) => {
+      const id = row.dataset.setVoice!;
+      const m = piper?.models.find((x) => x.id === id);
+      if (!m) return;
+      const v: VoiceInfo = { provider: "piper", id: m.id, name: m.name, locale: m.locale, installed: true };
+      const setDefault = (): void => {
+        defaultVoiceName = m.name;
+        updatePlaybackPrefs({ voice: { provider: "piper", id } });
+      };
+      row.addEventListener("click", setDefault);
+      row.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          setDefault();
+        }
+      });
+      row.querySelector<HTMLButtonElement>(".set-voice-row__preview")?.addEventListener("click", (e) => {
+        e.stopPropagation();
+        void togglePreview("piper", v);
+      });
+    });
+    paintPreview();
     card.querySelector<HTMLButtonElement>("[data-open-folder]")?.addEventListener("click", () => {
       if (piperPath) void ipc.showInFolder(piperPath).catch((e) => toast.error(describeError(e)));
     });
@@ -542,6 +766,7 @@ export function mountVoices(container: HTMLElement, ctx: VoicesCtx): { dispose()
     (s) => s.playback.voice,
     () => {
       renderDefault();
+      paintDefault();
       void resolveDefaultVoiceName();
     },
   );
@@ -549,6 +774,7 @@ export function mountVoices(container: HTMLElement, ctx: VoicesCtx): { dispose()
   return {
     dispose() {
       disposed = true;
+      stopPreview();
       unsubVoice();
       unlistened = true;
       if (unlisten) {

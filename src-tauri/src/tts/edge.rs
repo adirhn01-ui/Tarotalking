@@ -311,7 +311,19 @@ fn fetch_voices() -> Result<Vec<VoiceInfo>> {
             })
         })
         .collect();
-    voices.sort_by(|a, b| a.locale.cmp(&b.locale).then(a.name.cmp(&b.name)));
+    // US first, then GB, then the rest — matches what most users reach for.
+    let region_rank = |v: &VoiceInfo| match v.locale.as_deref() {
+        Some("en-US") => 0u8,
+        Some("en-GB") => 1,
+        Some("en-AU") | Some("en-CA") | Some("en-IE") | Some("en-NZ") => 2,
+        _ => 3,
+    };
+    voices.sort_by(|a, b| {
+        region_rank(a)
+            .cmp(&region_rank(b))
+            .then(a.locale.cmp(&b.locale))
+            .then(a.name.cmp(&b.name))
+    });
     Ok(voices)
 }
 

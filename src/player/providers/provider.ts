@@ -42,12 +42,14 @@ import { systemProvider } from "./system";
 import { edgeProvider } from "./edge";
 import { piperProvider } from "./piper";
 import { elevenProvider } from "./eleven";
+import { openaiProvider } from "./openai";
 
 const PROVIDERS: Record<ProviderId, TtsProvider> = {
   system: systemProvider,
   edge: edgeProvider,
   piper: piperProvider,
   eleven: elevenProvider,
+  openai: openaiProvider,
 };
 
 export function getProvider(id: ProviderId): TtsProvider {
@@ -56,5 +58,5 @@ export function getProvider(id: ProviderId): TtsProvider {
 
 /** Display order: free/no-setup first, cloud key last. */
 export function allProviders(): TtsProvider[] {
-  return [edgeProvider, systemProvider, piperProvider, elevenProvider];
+  return [edgeProvider, systemProvider, piperProvider, elevenProvider, openaiProvider];
 }

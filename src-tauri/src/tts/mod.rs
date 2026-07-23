@@ -4,6 +4,7 @@
 pub mod cache;
 pub mod edge;
 pub mod eleven;
+pub mod openai;
 pub mod piper;
 pub mod system;
 

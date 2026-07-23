@@ -99,13 +99,14 @@ export const IMPORT_EXTENSIONS = new Set(["epub", "txt", "md"]);
 
 /* ================= voices / TTS ================= */
 
-export type ProviderId = "system" | "edge" | "piper" | "eleven";
+export type ProviderId = "system" | "edge" | "piper" | "eleven" | "openai";
 
 export const PROVIDER_LABELS: Record<ProviderId, string> = {
   system: "System voices",
   edge: "Microsoft Edge voices",
   piper: "Local voices",
   eleven: "ElevenLabs",
+  openai: "OpenAI",
 };
 
 /** What settings persist to pick a voice. */
@@ -167,8 +168,25 @@ export type AppTheme = "dark" | "light" | "system";
 export type ReaderTheme = "default" | "paper" | "sepia" | "slate" | "black";
 export type HighlightMode = "sentence" | "word" | "off";
 
+/** Curated reader fonts — Windows-safe stacks, no webfonts (CSP + weight). */
+export const READER_FONTS: { id: string; label: string; stack: string; kind: "serif" | "sans" }[] = [
+  { id: "serif", label: "Georgia", stack: "Georgia, 'Times New Roman', serif", kind: "serif" },
+  { id: "constantia", label: "Constantia", stack: "Constantia, Georgia, serif", kind: "serif" },
+  { id: "palatino", label: "Palatino", stack: "'Palatino Linotype', 'Book Antiqua', Palatino, Georgia, serif", kind: "serif" },
+  { id: "cambria", label: "Cambria", stack: "Cambria, Georgia, serif", kind: "serif" },
+  { id: "times", label: "Times New Roman", stack: "'Times New Roman', Times, serif", kind: "serif" },
+  { id: "sans", label: "Segoe UI", stack: "'Segoe UI Variable Text', 'Segoe UI', system-ui, sans-serif", kind: "sans" },
+  { id: "calibri", label: "Calibri", stack: "Calibri, 'Segoe UI', sans-serif", kind: "sans" },
+  { id: "verdana", label: "Verdana", stack: "Verdana, Geneva, sans-serif", kind: "sans" },
+];
+
+/** CSS stack for a stored font id ("serif"/"sans" stay valid as defaults). */
+export function readerFontStack(id: string): string {
+  return (READER_FONTS.find((f) => f.id === id) ?? READER_FONTS[0]!).stack;
+}
+
 export interface ReaderPrefs {
-  /** Font stack key: "sans" | "serif" | a concrete family name. */
+  /** Font id from READER_FONTS ("serif" and "sans" are the legacy defaults). */
   font: string;
   fontSize: number; // px, 14..28
   lineHeight: number; // 1.3..2.2

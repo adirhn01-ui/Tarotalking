@@ -26,6 +26,8 @@ import { subscribeSelect } from "../core/store";
 import {
   ACTION_LABELS,
   PLAYBACK_RATES,
+  READER_FONTS,
+  readerFontStack,
   type ActionId,
   type ContentDoc,
   type Position,
@@ -42,6 +44,7 @@ import {
   createHighlighter,
   pctForPosition,
   renderChapter,
+  sentenceIndexForOffset,
   topmostBlockIndex,
   widthBucketLabel,
 } from "./render";
@@ -166,9 +169,7 @@ export async function mountReader(el: HTMLElement, itemId: string): Promise<Read
 
   function applyReaderStyle(): void {
     const r = settingsStore.get().reader;
-    const fontValue =
-      r.font === "serif" ? "var(--font-serif)" : r.font === "sans" ? "var(--font-ui)" : r.font;
-    surface.style.setProperty("--reader-font", fontValue);
+    surface.style.setProperty("--reader-font", readerFontStack(r.font));
     surface.style.setProperty("--reader-size", `${r.fontSize}px`);
     surface.style.setProperty("--reader-leading", String(r.lineHeight));
     surface.style.setProperty("--reader-width", `${r.width}px`);
@@ -485,9 +486,11 @@ export async function mountReader(el: HTMLElement, itemId: string): Promise<Read
     pop.className = "reader-pop";
     pop.innerHTML = `
       <div class="reader-pop__group">
-        <div class="reader-seg" data-ctl="font">
-          <button type="button" data-font="serif">Serif</button>
-          <button type="button" data-font="sans">Sans</button>
+        <div class="reader-fonts" data-ctl="font">
+          ${READER_FONTS.map(
+            (f) =>
+              `<button type="button" class="reader-font" data-font="${f.id}" title="${f.label}"><span class="reader-font__ag" style="font-family:${f.stack}">Ag</span><span class="reader-font__label">${f.label}</span></button>`,
+          ).join("")}
         </div>
       </div>
       <div class="reader-pop__group">
@@ -573,7 +576,7 @@ export async function mountReader(el: HTMLElement, itemId: string): Promise<Read
     if (!pop) return;
     const r = settingsStore.get().reader;
     pop.querySelectorAll<HTMLElement>("[data-font]").forEach((b) => {
-      b.classList.toggle("reader-seg--on", b.dataset.font === (r.font === "serif" ? "serif" : "sans"));
+      b.classList.toggle("reader-font--on", b.dataset.font === r.font);
     });
     const size = pop.querySelector<HTMLElement>('[data-val="size"]');
     if (size) size.textContent = `${r.fontSize} px`;
@@ -619,6 +622,14 @@ export async function mountReader(el: HTMLElement, itemId: string): Promise<Read
       row.append(label, kbd);
       grid.appendChild(row);
     });
+    const tipRow = document.createElement("div");
+    tipRow.className = "reader-shortcuts__row";
+    const tipLabel = document.createElement("span");
+    tipLabel.textContent = "Click any sentence — start speaking from there";
+    const tipKbd = document.createElement("kbd");
+    tipKbd.textContent = "Click";
+    tipRow.append(tipLabel, tipKbd);
+    grid.appendChild(tipRow);
     backdrop.appendChild(modal);
     document.body.appendChild(backdrop);
     const release = trapTab(modal);
@@ -759,6 +770,60 @@ export async function mountReader(el: HTMLElement, itemId: string): Promise<Read
     else highlighter.clearWord();
   });
 
+  /* ---------------- click a sentence → read from there ---------------- */
+
+  // Char offset of a hit (text node + offset) within its block's full text,
+  // walking the block's text nodes in document order — works whether or not the
+  // block currently carries sentence spans.
+  function charOffsetInBlock(blockEl: Element, hitNode: Node, hitOffset: number): number {
+    const walker = document.createTreeWalker(blockEl, NodeFilter.SHOW_TEXT);
+    let total = 0;
+    for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+      if (n === hitNode) return total + hitOffset;
+      total += n.textContent?.length ?? 0;
+    }
+    return total;
+  }
+
+  function resolveClickPos(clientX: number, clientY: number): Position | null {
+    const range = document.caretRangeFromPoint(clientX, clientY);
+    if (!range) return null;
+    const node = range.startContainer;
+    if (node.nodeType !== Node.TEXT_NODE) return null;
+    const blockEl = node.parentElement?.closest<HTMLElement>("[data-b]");
+    if (!blockEl) return null;
+    const chapter = Number(blockEl.dataset.c);
+    const block = Number(blockEl.dataset.b);
+    const text = doc.chapters[chapter]?.blocks[block]?.text ?? "";
+    if (!text) return null;
+    const offset = charOffsetInBlock(blockEl, node, range.startOffset);
+    return { chapter, block, sentence: sentenceIndexForOffset(text, offset) };
+  }
+
+  let clickDownX = 0;
+  let clickDownY = 0;
+  let clickDownBad = true;
+  const onSurfacePointerDown = (e: PointerEvent): void => {
+    clickDownX = e.clientX;
+    clickDownY = e.clientY;
+    clickDownBad = e.button !== 0 || e.ctrlKey || e.shiftKey || e.altKey || e.metaKey;
+  };
+  const onSurfacePointerUp = (e: PointerEvent): void => {
+    // Clean primary click only: no modifiers, no drag, no active selection.
+    if (clickDownBad || e.button !== 0 || e.ctrlKey || e.shiftKey || e.altKey || e.metaKey) return;
+    const dx = e.clientX - clickDownX;
+    const dy = e.clientY - clickDownY;
+    if (dx * dx + dy * dy >= 36) return; // moved >= 6px → treat as a drag, not a click
+    const sel = window.getSelection();
+    if (sel && !sel.isCollapsed) return; // drag- or double-click selection: leave it alone
+    const target = e.target as HTMLElement | null;
+    if (!target || target.closest("img, hr, a, .reader-chapter-title")) return;
+    const pos = resolveClickPos(e.clientX, e.clientY);
+    if (pos) engine.playFrom(pos);
+  };
+  surface.addEventListener("pointerdown", onSurfacePointerDown);
+  surface.addEventListener("pointerup", onSurfacePointerUp);
+
   /* ---------------- scroll + resize ---------------- */
 
   scroll.addEventListener("scroll", scheduleTrack, { passive: true });
@@ -802,6 +867,8 @@ export async function mountReader(el: HTMLElement, itemId: string): Promise<Read
       closeAa();
       for (const close of openCloseFns.splice(0)) close();
 
+      surface.removeEventListener("pointerdown", onSurfacePointerDown);
+      surface.removeEventListener("pointerup", onSurfacePointerUp);
       scroll.removeEventListener("scroll", scheduleTrack);
       scroll.removeEventListener("wheel", suppress);
       scroll.removeEventListener("touchstart", suppress);

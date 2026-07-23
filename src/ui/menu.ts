@@ -89,11 +89,17 @@ function onDismiss(): void {
   closeMenu();
 }
 
+/** Wheel inside the (scrollable) menu scrolls it; outside dismisses. */
+function onWheel(e: WheelEvent): void {
+  if (host && host.contains(e.target as Node)) return;
+  closeMenu();
+}
+
 function addListeners(): void {
   // capture phase so an outside pointerdown closes before other handlers run
   document.addEventListener("pointerdown", onOutsidePointerDown, true);
   document.addEventListener("keydown", onKeyDown, true);
-  window.addEventListener("wheel", onDismiss, true);
+  window.addEventListener("wheel", onWheel, true);
   window.addEventListener("resize", onDismiss);
   window.addEventListener("blur", onDismiss);
 }
@@ -101,7 +107,7 @@ function addListeners(): void {
 function removeListeners(): void {
   document.removeEventListener("pointerdown", onOutsidePointerDown, true);
   document.removeEventListener("keydown", onKeyDown, true);
-  window.removeEventListener("wheel", onDismiss, true);
+  window.removeEventListener("wheel", onWheel, true);
   window.removeEventListener("resize", onDismiss);
   window.removeEventListener("blur", onDismiss);
 }

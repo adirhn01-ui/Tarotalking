@@ -643,6 +643,16 @@ export const engine = {
     seekInternal(normalize(p));
   },
 
+  /** Jump to a position and speak from it (click-a-word-to-read). If already
+   *  playing, speech moves immediately; otherwise playback starts. */
+  playFrom(p: Position): void {
+    const next = normalize(p);
+    if (!next) return;
+    seekInternal(next);
+    const st = engineState.get().status;
+    if (st !== "playing" && st !== "loading") void engine.play();
+  },
+
   /** Seek by overall document fraction (the seek slider). */
   seekToPct(fraction: number): void {
     if (!doc) return;
