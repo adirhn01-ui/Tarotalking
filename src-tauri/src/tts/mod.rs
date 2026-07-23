@@ -5,6 +5,7 @@ pub mod cache;
 pub mod edge;
 pub mod eleven;
 pub mod piper;
+pub mod system;
 
 use crate::error::{AppError, Result};
 use serde::{Deserialize, Serialize};

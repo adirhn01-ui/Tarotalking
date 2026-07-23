@@ -174,6 +174,7 @@ pub fn run() {
             keys::key_delete,
             // tts
             tts::tts_synth,
+            tts::system::system_voices,
             tts::edge::edge_voices,
             tts::eleven::eleven_voices,
             tts::piper::piper_status,

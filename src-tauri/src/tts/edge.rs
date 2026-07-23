@@ -21,13 +21,26 @@ use tungstenite::client::IntoClientRequest;
 use tungstenite::Message;
 
 const TRUSTED_CLIENT_TOKEN: &str = "6A5AA1D4EAFF4E9FB37E23D68491D6F4";
-const CHROMIUM_FULL_VERSION: &str = "131.0.2903.99";
+// Must track a current Edge release: the service rejects stale client
+// versions (and handshakes without a muid cookie) with 403.
+const CHROMIUM_FULL_VERSION: &str = "143.0.3650.75";
 const WSS_BASE: &str =
     "wss://speech.platform.bing.com/consumer/speech/synthesize/readaloud/edge/v1";
 const VOICES_URL: &str =
     "https://speech.platform.bing.com/consumer/speech/synthesize/readaloud/voices/list";
 const OUTPUT_FORMAT: &str = "audio-24khz-48kbitrate-mono-mp3";
-const UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Edg/131.0.0.0";
+const UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0";
+
+/// Random per-connection browser id the service expects as a `muid` cookie.
+fn muid_cookie() -> String {
+    let mut hex = String::with_capacity(38);
+    hex.push_str("muid=");
+    for b in uuid::Uuid::new_v4().as_bytes() {
+        hex.push_str(&format!("{b:02X}"));
+    }
+    hex.push(';');
+    hex
+}
 
 /// Sec-MS-GEC: SHA-256(uppercase hex) of Windows-file-time ticks (100 ns since
 /// 1601-01-01) floored to a 5-minute boundary, concatenated with the token.
@@ -110,7 +123,9 @@ fn synth_once(voice_id: &str, text: &str, out: &Path) -> Result<Vec<WordBoundary
         "chrome-extension://jdiccldimpdaibmpdkjnbmckianbfold".parse().unwrap(),
     );
     headers.insert("Accept-Language", "en-US,en;q=0.9".parse().unwrap());
+    headers.insert("Accept-Encoding", "gzip, deflate, br, zstd".parse().unwrap());
     headers.insert("User-Agent", UA.parse().unwrap());
+    headers.insert("Cookie", muid_cookie().parse().unwrap());
 
     let (mut socket, _resp) = tungstenite::connect(request).map_err(offline)?;
 
@@ -293,6 +308,85 @@ fn fetch_voices() -> Result<Vec<VoiceInfo>> {
         .collect();
     voices.sort_by(|a, b| a.locale.cmp(&b.locale).then(a.name.cmp(&b.name)));
     Ok(voices)
+}
+
+#[cfg(test)]
+mod net_tests {
+    use super::*;
+
+    /// Handshake variation matrix — isolates which part the server rejects.
+    #[test]
+    #[ignore]
+    fn edge_net_handshake_matrix() {
+        let gec = sec_ms_gec();
+        let conn = uuid::Uuid::new_v4().simple().to_string();
+        let variants: Vec<(&str, String, Vec<(&str, &str)>)> = vec![
+            (
+                "bare (no extra headers)",
+                format!("{WSS_BASE}?TrustedClientToken={TRUSTED_CLIENT_TOKEN}&Sec-MS-GEC={gec}&Sec-MS-GEC-Version=1-131.0.2903.99&ConnectionId={conn}"),
+                vec![],
+            ),
+            (
+                "UA only",
+                format!("{WSS_BASE}?TrustedClientToken={TRUSTED_CLIENT_TOKEN}&Sec-MS-GEC={gec}&Sec-MS-GEC-Version=1-131.0.2903.99&ConnectionId={conn}"),
+                vec![("User-Agent", UA)],
+            ),
+            (
+                "full current set",
+                format!("{WSS_BASE}?TrustedClientToken={TRUSTED_CLIENT_TOKEN}&Sec-MS-GEC={gec}&Sec-MS-GEC-Version=1-131.0.2903.99&ConnectionId={conn}"),
+                vec![
+                    ("User-Agent", UA),
+                    ("Origin", "chrome-extension://jdiccldimpdaibmpdkjnbmckianbfold"),
+                    ("Pragma", "no-cache"),
+                    ("Cache-Control", "no-cache"),
+                    ("Accept-Language", "en-US,en;q=0.9"),
+                ],
+            ),
+            (
+                "no GEC at all",
+                format!("{WSS_BASE}?TrustedClientToken={TRUSTED_CLIENT_TOKEN}&ConnectionId={conn}"),
+                vec![("User-Agent", UA)],
+            ),
+        ];
+        for (label, url, headers) in variants {
+            let mut req = url.into_client_request().unwrap();
+            for (k, v) in headers {
+                req.headers_mut().insert(k, v.parse().unwrap());
+            }
+            match tungstenite::connect(req) {
+                Ok(_) => println!("[{label}] CONNECTED"),
+                Err(tungstenite::Error::Http(resp)) => {
+                    let body = resp
+                        .body()
+                        .as_ref()
+                        .map(|b| String::from_utf8_lossy(b).into_owned())
+                        .unwrap_or_default();
+                    println!("[{label}] HTTP {} body: {}", resp.status(), &body[..body.len().min(300)]);
+                }
+                Err(e) => println!("[{label}] ERR: {e}"),
+            }
+        }
+    }
+
+    /// Network test — run explicitly: cargo test edge_net -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn edge_net_voices_and_synth() {
+        match fetch_voices() {
+            Ok(v) => println!("voices ok: {} en voices", v.len()),
+            Err(e) => println!("voices FAILED: {e}"),
+        }
+        let out = std::env::temp_dir().join("tarotalking-edge-net-test.mp3");
+        match synth_once("en-US-AriaNeural", "Hello from the network test.", &out) {
+            Ok(b) => println!(
+                "synth ok: {} bytes, {} boundaries",
+                std::fs::metadata(&out).map(|m| m.len()).unwrap_or(0),
+                b.len()
+            ),
+            Err(e) => println!("synth FAILED: {e}"),
+        }
+        let _ = std::fs::remove_file(&out);
+    }
 }
 
 #[tauri::command]

@@ -225,6 +225,7 @@ pub fn synth(voice_id: &str, text: &str, out: &Path) -> Result<()> {
 }
 
 /// Installed models as VoiceInfo entries (for unified voice listing).
+#[allow(dead_code)] // reserved for a unified voice-list command
 pub fn installed_voices() -> Vec<VoiceInfo> {
     CATALOG
         .iter()

@@ -26,7 +26,7 @@ pub struct CacheStats {
 fn ext_for(provider: &str) -> Option<&'static str> {
     match provider {
         "edge" | "eleven" => Some("mp3"),
-        "piper" => Some("wav"),
+        "piper" | "system" => Some("wav"),
         _ => None,
     }
 }
@@ -101,6 +101,10 @@ pub fn synth_via_cache(provider: &str, voice_id: &str, text: &str) -> Result<Syn
         }
         "piper" => {
             crate::tts::piper::synth(voice_id, text, &audio_path)?;
+            None
+        }
+        "system" => {
+            crate::tts::system::synth(voice_id, text, &audio_path)?;
             None
         }
         "eleven" => {

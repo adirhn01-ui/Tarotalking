@@ -112,6 +112,7 @@ export const ipc = {
    *  re-synthesizes. */
   synth: (provider: ProviderId, voiceId: string, text: string): Promise<SynthResult> =>
     call("tts_synth", { provider, voiceId, text }),
+  systemVoices: (): Promise<VoiceInfo[]> => call("system_voices"),
   edgeVoices: (): Promise<VoiceInfo[]> => call("edge_voices"),
   elevenVoices: (): Promise<VoiceInfo[]> => call("eleven_voices"),
 

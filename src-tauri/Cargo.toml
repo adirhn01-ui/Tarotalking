@@ -27,6 +27,15 @@ quick-xml = "0.37"
 ureq = "2"
 tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 keyring = { version = "3", features = ["windows-native"] }
+# System (Windows) voices via WinRT speech synthesis — WebView2 has no
+# speechSynthesis bridge, so the OS API is the offline baseline provider.
+windows = { version = "0.61", features = [
+    "Media_SpeechSynthesis",
+    "Media_Core",
+    "Storage_Streams",
+    "Foundation",
+    "Foundation_Collections",
+] }
 sha2 = "0.10"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 uuid = { version = "1", features = ["v4"] }
