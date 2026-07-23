@@ -208,6 +208,17 @@ async function importEpubFile(path: string): Promise<{ id: string; title: string
 
     included++;
     const title = raw.title?.trim() || firstHeadingText(blocks) || `Chapter ${included}`;
+    // The reader renders the chapter title itself — drop a leading heading
+    // block that just repeats it, or the heading shows twice.
+    const first = blocks[0];
+    if (
+      first &&
+      (first.t === "h1" || first.t === "h2" || first.t === "h3") &&
+      (first.text ?? "").trim().toLowerCase() === title.trim().toLowerCase()
+    ) {
+      blocks.shift();
+      if (blocks.length === 0) continue;
+    }
     chapters.push({ title, blocks });
   }
 
