@@ -212,6 +212,7 @@ pub fn run() {
             // import
             import::epub::import_epub,
             import::text::read_text_file,
+            import::text::read_file_bytes,
             import::web::fetch_url,
             // keys
             keys::key_set,

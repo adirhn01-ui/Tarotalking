@@ -106,6 +106,11 @@ export const ipc = {
     call("import_epub", { id, path }),
   /** Read a text-ish file (txt/md), size-capped, lossy UTF-8. */
   readTextFile: (path: string): Promise<string> => call("read_text_file", { path }),
+  /** Raw bytes for frontend-side parsers (PDF). Arrives as an ArrayBuffer. */
+  readFileBytes: async (path: string): Promise<Uint8Array> => {
+    const buf = await call<ArrayBuffer>("read_file_bytes", { path });
+    return new Uint8Array(buf);
+  },
   /** Fetch a web page over HTTP(S) in Rust (frontend has no network). */
   fetchUrl: (url: string): Promise<FetchedPage> => call("fetch_url", { url }),
   /** Persist the parsed ContentDoc JSON for an item. */

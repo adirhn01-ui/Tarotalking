@@ -159,3 +159,66 @@ const epub = zip([
 const out = path.join(outDir, "fixture-book.epub");
 writeFileSync(out, epub);
 console.log("fixture ready:", path.relative(root, out), `(${epub.length} bytes)`);
+
+/* ---- minimal two-page PDF (uncompressed, byte-accurate xref) ---- */
+
+function makePdf(pages) {
+  // Objects: 1 catalog, 2 pages tree, then per page: page + contents stream.
+  const objects = [];
+  const pageRefs = pages.map((_, i) => `${3 + i * 2} 0 R`).join(" ");
+  objects.push(`1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n`);
+  objects.push(
+    `2 0 obj\n<< /Type /Pages /Kids [${pageRefs}] /Count ${pages.length} >>\nendobj\n`,
+  );
+  pages.forEach((lines, i) => {
+    const pageNum = 3 + i * 2;
+    const contentNum = pageNum + 1;
+    objects.push(
+      `${pageNum} 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] ` +
+        `/Resources << /Font << /F1 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> >> >> ` +
+        `/Contents ${contentNum} 0 R >>\nendobj\n`,
+    );
+    let y = 720;
+    let body = "BT\n";
+    for (const [size, text] of lines) {
+      body += `/F1 ${size} Tf 72 ${y} Td (${text.replace(/[\\()]/g, "\\$&")}) Tj\n`;
+      y -= size * 1.6;
+      body = body.replace(/Td \(/, "Td ("); // keep simple: absolute Td per line
+      body += "ET\nBT\n";
+    }
+    body += "ET\n";
+    objects.push(
+      `${contentNum} 0 obj\n<< /Length ${body.length} >>\nstream\n${body}endstream\nendobj\n`,
+    );
+  });
+
+  let pdf = "%PDF-1.4\n";
+  const offsets = [0];
+  for (const obj of objects) {
+    offsets.push(pdf.length);
+    pdf += obj;
+  }
+  const xrefAt = pdf.length;
+  pdf += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
+  for (let i = 1; i <= objects.length; i++) {
+    pdf += `${String(offsets[i]).padStart(10, "0")} 00000 n \n`;
+  }
+  pdf += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xrefAt}\n%%EOF\n`;
+  return Buffer.from(pdf, "latin1");
+}
+
+const pdfBuf = makePdf([
+  [
+    [24, "The Fixture Paper"],
+    [12, "This is the first paragraph of the fixture PDF. It exists to prove"],
+    [12, "that text extraction produces readable blocks for the reader."],
+  ],
+  [
+    [18, "Second Section"],
+    [12, "Page two carries a second heading and one more paragraph so the"],
+    [12, "chapterizer has something to chew on."],
+  ],
+]);
+const pdfOut = path.join(outDir, "fixture-doc.pdf");
+writeFileSync(pdfOut, pdfBuf);
+console.log("fixture ready:", path.relative(root, pdfOut), `(${pdfBuf.length} bytes)`);

@@ -110,6 +110,26 @@ export async function runAutotest(): Promise<void> {
       assert(doc.chapters[0]!.blocks.length >= 2, "expected ≥2 blocks");
     });
 
+    await test("import-pdf", async () => {
+      const ids = await importFiles([`${info.fixturesDir}\\fixture-doc.pdf`]);
+      assert(ids.length === 1, `expected 1 imported id, got ${ids.length}`);
+      createdItemIds.push(ids[0]!);
+      const item = getItem(ids[0]!);
+      assert(item?.sourceType === "pdf", `sourceType: ${item?.sourceType}`);
+      assert(item.wordCount > 20, `wordCount: ${item.wordCount}`);
+      const doc = await loadDoc(ids[0]!);
+      assert(doc.chapters.length >= 1, `chapters: ${doc.chapters.length}`);
+      const text = doc.chapters
+        .flatMap((c) => c.blocks)
+        .map((b) => b.text ?? "")
+        .join(" ");
+      assert(
+        text.includes("first paragraph of the fixture PDF"),
+        "extracted text missing expected content",
+      );
+      return `chapters: ${doc.chapters.length}`;
+    });
+
     await test("engine-navigation", async () => {
       assert(epubId, "no epub imported");
       const doc = await loadDoc(epubId);

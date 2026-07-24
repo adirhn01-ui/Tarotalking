@@ -34,7 +34,7 @@ export interface ContentDoc {
 
 /* ================= library ================= */
 
-export type SourceType = "epub" | "text" | "paste" | "url";
+export type SourceType = "epub" | "text" | "paste" | "url" | "pdf";
 
 /** A location inside a ContentDoc. Sentence indices are per-block,
  *  lazily derived via Intl.Segmenter (never persisted per-book). */
@@ -124,7 +124,7 @@ export interface LibraryIndex {
 export const EMPTY_LIBRARY: LibraryIndex = { version: 1, items: [], collections: [] };
 
 /** File extensions accepted for import. */
-export const IMPORT_EXTENSIONS = new Set(["epub", "txt", "md"]);
+export const IMPORT_EXTENSIONS = new Set(["epub", "txt", "md", "pdf"]);
 
 /* ================= voices / TTS ================= */
 

@@ -251,6 +251,16 @@
   height: 18px;
   background: var(--border);
 }
+/* divider before the trailing dismiss control */
+.hl-toolbar__sep--end {
+  margin: 0 var(--sp-1);
+}
+.hl-toolbar__dismiss {
+  color: var(--text-3);
+}
+.hl-toolbar__dismiss:hover {
+  color: var(--text-1);
+}
 
 /* highlight edit/delete popover */
 .hl-pop {

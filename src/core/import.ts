@@ -246,6 +246,31 @@ async function importEpubFile(path: string): Promise<{ id: string; title: string
   return { id, title };
 }
 
+async function importPdfFile(path: string): Promise<{ id: string; title: string }> {
+  const bytes = await ipc.readFileBytes(path);
+  // pdfjs (heavy) lives behind a dynamic import inside extractPdf; loading it
+  // here keeps the PDF path fully lazy.
+  const { extractPdf } = await import("./pdf-blocks");
+  const { chapters, info } = await extractPdf(bytes);
+  if (chapters.length === 0) {
+    throw new Error("This PDF has no extractable text — it may be a scanned document");
+  }
+
+  const title = info.title?.trim() || fileStem(path);
+  const author = info.author?.trim() || undefined;
+  const id = crypto.randomUUID();
+  const wordCount = countDocWords(chapters);
+  const doc: ContentDoc = author
+    ? { version: 1, title, author, chapters }
+    : { version: 1, title, chapters };
+
+  await ipc.writeDoc(id, doc);
+  addItem(
+    makeItem({ id, title, author, sourceType: "pdf", wordCount, chapterCount: chapters.length }),
+  );
+  return { id, title };
+}
+
 async function importTextFile(path: string, markdown: boolean): Promise<{ id: string; title: string }> {
   const text = await ipc.readTextFile(path);
   const title = fileStem(path);
@@ -284,6 +309,7 @@ export async function importFiles(paths: string[]): Promise<string[]> {
       const ext = fileExt(path);
       let created: { id: string; title: string };
       if (ext === "epub") created = await importEpubFile(path);
+      else if (ext === "pdf") created = await importPdfFile(path);
       else if (ext === "txt" || ext === "md") created = await importTextFile(path, ext === "md");
       else throw new Error("Unsupported file type");
       ids.push(created.id);

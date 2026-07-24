@@ -147,13 +147,14 @@ function hostOf(url: string): string {
 
 function sourceIcon(type: SourceType): string {
   if (type === "url") return icon.globe;
-  if (type === "text") return icon.fileText;
+  if (type === "text" || type === "pdf") return icon.fileText;
   if (type === "paste") return icon.clipboard;
   return icon.book;
 }
 
 function badgeLabel(item: LibraryItem): string | null {
   if (item.sourceType === "url") return "Web";
+  if (item.sourceType === "pdf") return "PDF";
   if (item.sourceType === "text" || item.sourceType === "paste") return "Text";
   return null;
 }
@@ -231,7 +232,7 @@ function matchesFilter(item: LibraryItem): boolean {
     case "all":
       return true;
     case "books":
-      return item.sourceType === "epub";
+      return item.sourceType === "epub" || item.sourceType === "pdf";
     case "articles":
       return item.sourceType === "url";
     case "text":
@@ -389,7 +390,7 @@ async function pickAndImportFiles(): Promise<void> {
     const { open } = await import("@tauri-apps/plugin-dialog");
     const picked = await open({
       multiple: true,
-      filters: [{ name: "Readable files", extensions: ["epub", "txt", "md"] }],
+      filters: [{ name: "Readable files", extensions: ["epub", "pdf", "txt", "md"] }],
     });
     if (!picked) return;
     const paths = Array.isArray(picked) ? picked : [picked];
@@ -623,7 +624,7 @@ function emptyStateHtml(): string {
       <div class="empty-state">
         ${icon.bookOpen}
         <div class="lib-empty__title">Your library is empty</div>
-        <div class="lib-empty__sub">Import an EPUB or text file, paste text, or add an article from the web — or just drop files here.</div>
+        <div class="lib-empty__sub">Import an EPUB, PDF, or text file, paste text, or add an article from the web — or just drop files here.</div>
         <div class="lib-empty__actions">
           <button class="btn btn--primary" data-act="import" type="button">${icon.plus}Import files</button>
           <button class="btn" data-act="paste" type="button">${icon.clipboard}Paste text</button>

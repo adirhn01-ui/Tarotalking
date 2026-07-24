@@ -1065,7 +1065,9 @@ export async function mountReader(el: HTMLElement, itemId: string): Promise<Read
           `<button type="button" class="hl-dot hl-c-${c}" data-color="${c}" title="${HL_COLOR_LABELS[c]}" aria-label="Highlight ${HL_COLOR_LABELS[c].toLowerCase()}"></button>`,
       ).join("") +
       `<span class="hl-toolbar__sep" aria-hidden="true"></span>` +
-      `<button type="button" class="btn btn--ghost btn--sm hl-toolbar__note">Note</button>`;
+      `<button type="button" class="btn btn--ghost btn--sm hl-toolbar__note">Note</button>` +
+      `<span class="hl-toolbar__sep hl-toolbar__sep--end" aria-hidden="true"></span>` +
+      `<button type="button" class="btn btn--ghost btn--icon btn--sm hl-toolbar__dismiss" title="Dismiss">${icon.x}</button>`;
     root.appendChild(bar);
     hlToolbar = bar;
 
@@ -1079,6 +1081,9 @@ export async function mountReader(el: HTMLElement, itemId: string): Promise<Read
         createAnnotation(dot.dataset.color as AnnotationColor, false);
       } else if ((e.target as HTMLElement).closest(".hl-toolbar__note")) {
         createAnnotation("yellow", true);
+      } else if ((e.target as HTMLElement).closest(".hl-toolbar__dismiss")) {
+        hideHlToolbar();
+        window.getSelection()?.removeAllRanges();
       }
     });
 

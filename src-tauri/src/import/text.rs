@@ -5,6 +5,24 @@ use std::fs;
 
 const MAX_BYTES: u64 = 20 * 1024 * 1024;
 
+/// Raw file bytes for frontend-side parsers (PDF). Returned as a raw IPC
+/// response (ArrayBuffer on the JS side) — never JSON-serialized.
+#[tauri::command]
+pub async fn read_file_bytes(path: String) -> Result<tauri::ipc::Response> {
+    tauri::async_runtime::spawn_blocking(move || {
+        const MAX: u64 = 100 * 1024 * 1024;
+        let meta =
+            std::fs::metadata(&path).map_err(|_| AppError::msg("Could not read this file"))?;
+        if meta.len() > MAX {
+            return Err(AppError::msg("This file is too large to import"));
+        }
+        let bytes = std::fs::read(&path).map_err(|_| AppError::msg("Could not read this file"))?;
+        Ok(tauri::ipc::Response::new(bytes))
+    })
+    .await
+    .map_err(|e| AppError::wrap("Read task", e))?
+}
+
 #[tauri::command]
 pub async fn read_text_file(path: String) -> Result<String> {
     // Up to 20 MB of sync I/O — keep it off the async worker threads.

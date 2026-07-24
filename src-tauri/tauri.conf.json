@@ -46,6 +46,12 @@
         "name": "EPUB e-book",
         "description": "E-book readable in Tarotalking",
         "role": "Viewer"
+      },
+      {
+        "ext": ["pdf"],
+        "name": "PDF document",
+        "description": "PDF readable in Tarotalking",
+        "role": "Viewer"
       }
     ],
     "windows": {

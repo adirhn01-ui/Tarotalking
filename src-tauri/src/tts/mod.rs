@@ -12,8 +12,11 @@ pub mod piper;
 pub mod speechify;
 pub mod system;
 
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::{Duration, Instant};
 use tauri::Emitter;
 
 /// One pre-synthesis job at a time; cancellation is a shared flag.
@@ -56,45 +59,125 @@ pub async fn tts_precache(
         *CANCEL_BRIDGE.lock().unwrap() = Some(cancel_in.clone());
     }
 
-    let total = texts.len() as u64;
+    // ---- Worker-pool precache ------------------------------------------------
+    // A 2000-word chapter used to take minutes because sentences synthesized
+    // strictly one at a time: every Edge sentence paid a fresh WebSocket
+    // handshake and every local engine reloaded its model per spawn. Here a pool
+    // of K workers (K = precache_workers(provider): 2 for the CPU/process-heavy
+    // local engines, 4 for the network-bound cloud ones) pulls sentence indices
+    // from a shared atomic cursor and synthesizes in parallel.
+    //
+    // synth_via_cache is thread-safe for DIFFERENT texts — each writes its own
+    // staging file, and prune never evicts files younger than 120s — so the one
+    // real hazard is two workers racing on the SAME cache key (their staging
+    // files would collide). The up-front de-duplication rules that out. The
+    // scope's main thread doubles as the throttled progress emitter, and
+    // thread::scope joins every worker before returning, so a cancel or an error
+    // winds the whole pool down cleanly before the terminal emit.
     let result = tauri::async_runtime::spawn_blocking(move || {
-        let mut synthesized = 0u32;
-        let mut last_emit = std::time::Instant::now();
-        let emit = |app: &tauri::AppHandle, done: u64, finished: bool, error: Option<String>| {
+        // De-duplicate first: repeated sentences share a cache key, and two
+        // workers on the same key would collide on its staging file. Preserve
+        // first-occurrence order and drop empty/whitespace texts here so the
+        // progress total reflects only the real synthesis work.
+        let mut seen: HashSet<&str> = HashSet::new();
+        let work: Vec<&str> = texts
+            .iter()
+            .map(|s| s.as_str())
+            .filter(|t| !t.trim().is_empty())
+            .filter(|t| seen.insert(*t))
+            .collect();
+        let total = work.len() as u64;
+
+        let emit = |received: u64, done: bool, error: Option<String>| {
             let _ = app.emit(
                 "download-progress",
                 crate::downloads::DownloadProgress {
                     task_id: task_id.clone(),
                     label: label.clone(),
-                    received: done,
+                    received,
                     total: Some(total),
-                    done: finished,
+                    done,
                     error,
                 },
             );
         };
-        emit(&app, 0, false, None);
-        for (i, text) in texts.iter().enumerate() {
-            if cancel_flag.load(Ordering::SeqCst) {
-                emit(&app, i as u64, true, Some("Cancelled".into()));
-                return Ok(synthesized);
+        emit(0, false, None);
+
+        let completed = Arc::new(AtomicU32::new(0));
+        let cursor = Arc::new(AtomicUsize::new(0));
+        let error_flag = Arc::new(AtomicBool::new(false));
+        let first_error: Mutex<Option<AppError>> = Mutex::new(None);
+
+        // Never spawn more workers than there is work.
+        let k = precache_workers(&provider).min(work.len());
+        let provider = provider.as_str();
+        let voice_id = voice_id.as_str();
+        let work = &work;
+        let first_error = &first_error;
+
+        thread::scope(|scope| {
+            for _ in 0..k {
+                let completed = Arc::clone(&completed);
+                let cursor = Arc::clone(&cursor);
+                let error_flag = Arc::clone(&error_flag);
+                let cancel_flag = Arc::clone(&cancel_flag);
+                scope.spawn(move || loop {
+                    // Wind down as soon as anyone cancels or hits an error.
+                    if cancel_flag.load(Ordering::SeqCst) || error_flag.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    let idx = cursor.fetch_add(1, Ordering::SeqCst);
+                    if idx >= work.len() {
+                        break;
+                    }
+                    match cache::synth_via_cache(provider, voice_id, work[idx]) {
+                        Ok(_) => {
+                            completed.fetch_add(1, Ordering::SeqCst);
+                        }
+                        Err(e) => {
+                            // Keep the FIRST error; signal the others to stop.
+                            let mut slot = first_error.lock().unwrap();
+                            if slot.is_none() {
+                                *slot = Some(e);
+                            }
+                            error_flag.store(true, Ordering::SeqCst);
+                            break;
+                        }
+                    }
+                });
             }
-            if text.trim().is_empty() {
-                continue;
-            }
-            match cache::synth_via_cache(&provider, &voice_id, text) {
-                Ok(_) => synthesized += 1,
-                Err(e) => {
-                    emit(&app, i as u64, true, Some(e.to_string()));
-                    return Err(e);
+
+            // Progress emitter (this thread): throttle to ~300ms until the pool
+            // finishes, is cancelled, or errors. The single terminal emit is
+            // sent after the scope joins, when the counts are final.
+            let mut last_emit = Instant::now();
+            loop {
+                let done_now = completed.load(Ordering::SeqCst) as u64;
+                if cancel_flag.load(Ordering::SeqCst)
+                    || error_flag.load(Ordering::SeqCst)
+                    || done_now >= total
+                {
+                    break;
                 }
+                if last_emit.elapsed() >= Duration::from_millis(300) {
+                    emit(done_now, false, None);
+                    last_emit = Instant::now();
+                }
+                thread::sleep(Duration::from_millis(50));
             }
-            if last_emit.elapsed().as_millis() >= 250 {
-                emit(&app, (i + 1) as u64, false, None);
-                last_emit = std::time::Instant::now();
-            }
+        });
+
+        // Pool fully joined here — the count and the error slot are stable.
+        let synthesized = completed.load(Ordering::SeqCst);
+        if cancel_flag.load(Ordering::SeqCst) {
+            emit(synthesized as u64, true, Some("Cancelled".into()));
+            return Ok(synthesized);
         }
-        emit(&app, total, true, None);
+        if let Some(err) = first_error.lock().unwrap().take() {
+            emit(synthesized as u64, true, Some(err.to_string()));
+            return Err(err);
+        }
+        emit(synthesized as u64, true, None);
         Ok(synthesized)
     })
     .await
@@ -114,6 +197,18 @@ pub fn tts_precache_cancel(state: tauri::State<'_, PrecacheState>) {
     state.cancel.store(true, Ordering::SeqCst);
     if let Some(flag) = CANCEL_BRIDGE.lock().unwrap().as_ref() {
         flag.store(true, Ordering::SeqCst);
+    }
+}
+
+/// How many precache workers to run in parallel for a provider. Local engines
+/// (system/piper/kokoro) are CPU- and process-heavy — each synth spawns a
+/// process or reloads a model — so cap the pool at 2. Network-bound cloud
+/// providers tolerate more in-flight sockets, so use 4. Unknown providers get
+/// the network width (they are never local).
+fn precache_workers(provider: &str) -> usize {
+    match provider {
+        "system" | "piper" | "kokoro" => 2,
+        _ => 4,
     }
 }
 
@@ -172,4 +267,23 @@ pub async fn tts_synth(
     })
     .await
     .map_err(|e| AppError::wrap("Synthesis task failed", e))?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::precache_workers;
+
+    #[test]
+    fn precache_workers_by_provider() {
+        // Local engines are process/CPU-heavy → 2 workers.
+        for local in ["system", "piper", "kokoro"] {
+            assert_eq!(precache_workers(local), 2, "{local} is a local engine → 2");
+        }
+        // Network-bound cloud providers → 4 workers.
+        for net in ["edge", "eleven", "openai", "speechify", "deepgram", "cartesia"] {
+            assert_eq!(precache_workers(net), 4, "{net} is network-bound → 4");
+        }
+        // Unknown providers default to the network width (never local).
+        assert_eq!(precache_workers("bogus"), 4);
+    }
 }
