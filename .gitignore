@@ -7,3 +7,13 @@ release/
 fixtures/
 *.log
 .DS_Store
+Thumbs.db
+.env
+.env.*
+.vscode/
+.idea/
+
+# local editor/assistant tooling
+.claude/
+AGENTS.md
+CLAUDE.md

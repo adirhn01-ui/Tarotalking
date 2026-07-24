@@ -3,6 +3,10 @@
   "version": "0.5.0",
   "description": "Fast, lightweight desktop reading and text-to-speech app",
   "license": "GPL-3.0-or-later",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/adirhn01-ui/Tarotalking.git"
+  },
   "private": true,
   "type": "module",
   "scripts": {
