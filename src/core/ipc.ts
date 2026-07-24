@@ -184,6 +184,9 @@ export const ipc = {
   takePendingOpenPaths: (): Promise<string[]> => call("take_pending_open_paths"),
   /** Graceful quit (tray) — call after flushing state. */
   quitApp: (): Promise<void> => call("quit_app"),
+  /** Remove the app and all of its data from this PC, then exit. Resolves just
+   *  before the backend exits; rejects only when there's no uninstaller. */
+  uninstallApp: (): Promise<void> => call("uninstall_app"),
   debugInfo: (): Promise<DebugInfo> => call("debug_info"),
   /** Dev E2E only: persist the autotest report for the E2E runner. */
   autotestReport: (report: unknown): Promise<void> => call("autotest_report", { report }),

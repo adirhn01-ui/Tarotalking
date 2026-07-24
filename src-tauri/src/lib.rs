@@ -10,6 +10,7 @@ mod paths;
 mod settings;
 mod tray;
 mod tts;
+mod uninstall;
 
 use error::Result;
 use std::sync::Mutex;
@@ -198,6 +199,7 @@ pub fn run() {
             set_playback_state,
             show_in_folder,
             quit_app,
+            uninstall::uninstall_app,
             debug_info,
             autotest_report,
             // settings

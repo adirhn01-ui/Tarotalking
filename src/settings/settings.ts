@@ -656,7 +656,14 @@ export function mountSettings(el: HTMLElement, section?: string): SettingsView {
         "Library, imported content, and settings",
       ),
     );
-    return sectionHeadHtml("storage", "Storage") + cacheGroup + dataGroup;
+    const uninstallGroup = groupHtml(
+      "Uninstall",
+      rowHtml(
+        "Remove Tarotalking and all of its data from this PC.",
+        `<button type="button" class="btn btn--danger" id="s-uninstall">Uninstall Tarotalking</button>`,
+      ),
+    );
+    return sectionHeadHtml("storage", "Storage") + cacheGroup + dataGroup + uninstallGroup;
   }
 
   function aboutHtml(): string {
@@ -941,6 +948,9 @@ export function mountSettings(el: HTMLElement, section?: string): SettingsView {
         onConfirm: () => void clearCache(),
       });
     });
+    inner
+      .querySelector<HTMLButtonElement>("#s-uninstall")
+      ?.addEventListener("click", openUninstallModal);
   }
 
   async function clearCache(): Promise<void> {
@@ -951,6 +961,57 @@ export function mountSettings(el: HTMLElement, section?: string): SettingsView {
       toast.error(`Couldn't clear the cache: ${describeError(e)}`);
     }
     await loadCacheStats();
+  }
+
+  /* ---------------- uninstall ---------------- */
+
+  function openUninstallModal(): void {
+    openModal({
+      title: "Uninstall Tarotalking",
+      build: (body) => {
+        body.innerHTML = `
+          <p class="set-modal-msg">This permanently deletes the following from this PC:</p>
+          <ul class="set-modal-msg" style="margin: var(--sp-3) 0; padding-left: var(--sp-5);">
+            <li>the installed app</li>
+            <li>your library and imported books</li>
+            <li>reading positions, bookmarks, highlights and notes</li>
+            <li>settings</li>
+            <li>audio cache</li>
+            <li>downloaded voices</li>
+            <li>saved API keys</li>
+          </ul>
+          <p class="set-modal-msg">Original files you imported (EPUBs, PDFs, text) are not touched.</p>`;
+      },
+      footer: (footer, close) => {
+        const cancel = document.createElement("button");
+        cancel.type = "button";
+        cancel.className = "btn btn--sm btn--ghost";
+        cancel.textContent = "Cancel";
+        cancel.addEventListener("click", close);
+        const confirm = document.createElement("button");
+        confirm.type = "button";
+        confirm.className = "btn btn--sm btn--danger";
+        confirm.textContent = "Uninstall and delete all data";
+        confirm.addEventListener("click", () => void runUninstall(confirm));
+        footer.append(cancel, confirm);
+      },
+    });
+  }
+
+  async function runUninstall(confirmBtn: HTMLButtonElement): Promise<void> {
+    confirmBtn.disabled = true;
+    confirmBtn.textContent = "Uninstalling";
+    try {
+      // Drop the autostart entry first — the NSIS uninstaller doesn't own the
+      // registry Run key the plugin created.
+      await (await import("@tauri-apps/plugin-autostart")).disable().catch(() => {});
+      await ipc.uninstallApp();
+      // Success: the backend deletes everything and exits the app — nothing to do.
+    } catch (e) {
+      toast.error(describeError(e));
+      confirmBtn.disabled = false;
+      confirmBtn.textContent = "Uninstall and delete all data";
+    }
   }
 
   /* ---------------- shortcut capture ---------------- */
