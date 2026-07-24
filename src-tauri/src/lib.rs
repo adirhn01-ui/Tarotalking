@@ -109,8 +109,31 @@ fn autotest_report(report: serde_json::Value) -> Result<()> {
     paths::atomic_write(&path, &bytes)
 }
 
+/// Dev-only stderr logger so warnings/errors from tauri internals (e.g. the
+/// asset protocol's deny reasons) are visible in the dev console.
+#[cfg(debug_assertions)]
+struct StderrLog;
+#[cfg(debug_assertions)]
+impl log::Log for StderrLog {
+    fn enabled(&self, metadata: &log::Metadata) -> bool {
+        metadata.level() <= log::Level::Warn
+    }
+    fn log(&self, record: &log::Record) {
+        if self.enabled(record.metadata()) {
+            eprintln!("[{}] {}: {}", record.level(), record.target(), record.args());
+        }
+    }
+    fn flush(&self) {}
+}
+#[cfg(debug_assertions)]
+static STDERR_LOG: StderrLog = StderrLog;
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    #[cfg(debug_assertions)]
+    {
+        let _ = log::set_logger(&STDERR_LOG).map(|()| log::set_max_level(log::LevelFilter::Warn));
+    }
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
@@ -130,6 +153,23 @@ pub fn run() {
         .manage(OpenQueue(Mutex::new(Vec::new())))
         .manage(PlaybackState(Mutex::new(PlaybackFlag::default())))
         .setup(|app| {
+            // Asset-scope hardening: the scope check canonicalizes the
+            // REQUESTED path, so when filesystem virtualization redirects our
+            // data dirs (e.g. running under an MSIX-packaged parent, whose
+            // children get AppData rerouted into .../Packages/<pkg>/LocalCache),
+            // the config patterns no longer match and every asset 403s.
+            // Allow both the env-derived dirs AND their canonicalized forms —
+            // identical on a normal launch, divergent (and required) when
+            // virtualized.
+            let asset_scope = app.asset_protocol_scope();
+            for dir in [paths::appdata_dir(), paths::localdata_dir()] {
+                let _ = paths::ensure_dir(&dir);
+                let _ = asset_scope.allow_directory(&dir, true);
+                if let Ok(canonical) = std::fs::canonicalize(&dir) {
+                    let _ = asset_scope.allow_directory(&canonical, true);
+                }
+            }
+
             let args: Vec<String> = std::env::args().collect();
             queue_paths_from_args(app.handle(), &args);
             tray::init(app.handle());

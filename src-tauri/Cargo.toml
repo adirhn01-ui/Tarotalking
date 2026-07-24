@@ -38,6 +38,7 @@ windows = { version = "0.61", features = [
 ] }
 sha2 = "0.10"
 base64 = "0.22"
+log = "0.4"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 uuid = { version = "1", features = ["v4"] }
 

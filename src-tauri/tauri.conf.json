@@ -25,6 +25,7 @@
     ],
     "security": {
       "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; media-src 'self' asset: http://asset.localhost blob:; img-src 'self' asset: http://asset.localhost data:; connect-src ipc: http://ipc.localhost asset: http://asset.localhost",
+      "dangerousDisableAssetCspModification": ["style-src"],
       "devCsp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; media-src 'self' asset: http://asset.localhost blob:; img-src 'self' asset: http://asset.localhost data:; connect-src ipc: http://ipc.localhost asset: http://asset.localhost ws://localhost:1420",
       "assetProtocol": {
         "enable": true,
