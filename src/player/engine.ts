@@ -9,7 +9,7 @@
 //   engine.startSleepTimer/cancelSleepTimer, engine.seekToPct
 
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { setPlaybackPosition, updateItem } from "../core/library";
+import { getItem, setPlaybackPosition, updateItem } from "../core/library";
 import { describeError, inTauri, ipc } from "../core/ipc";
 import { splitSentences, type SentenceSpan } from "../core/segment";
 import { settingsStore, updatePlaybackPrefs } from "../core/session";
@@ -239,7 +239,12 @@ function persistPosition(): void {
 
 /* ---- voice resolution ---- */
 
+/** Per-book voice memory — set at load, updated when the user picks a voice
+ *  while this book is bound. Falls back to the global default. */
+let itemVoiceOverride: VoiceRef | null = null;
+
 async function resolveVoice(): Promise<VoiceRef> {
+  if (itemVoiceOverride) return itemVoiceOverride;
   const set = settingsStore.get().playback.voice;
   if (set) return set;
   // First run: prefer Edge (best free quality) when reachable, else system,
@@ -405,7 +410,7 @@ async function speakCurrent(): Promise<void> {
     if (myGen !== gen) return;
     const el = ensureAudio();
     el.src = convertFileSrc(result.path);
-    el.playbackRate = prefs.rate;
+    el.playbackRate = engineState.get().rate; // per-book memory, not the global default
     el.volume = prefs.volume;
     currentBounds = result.boundaries?.length ? result.boundaries : null;
     boundIndex = 0;
@@ -436,7 +441,7 @@ async function speakCurrent(): Promise<void> {
       return;
     }
     utterHandle = provider.speak(voice.id, sentence.text, {
-      rate: prefs.rate,
+      rate: engineState.get().rate,
       volume: prefs.volume,
       onBoundary: (charStart, charLen) => {
         if (myGen !== gen) return;
@@ -518,12 +523,15 @@ function initMediaSession(): void {
 }
 initMediaSession();
 
-// Voice changed in settings → restart the current sentence with the new voice.
+// Voice changed (bar/settings) → the bound book remembers it, and a playing
+// sentence restarts with the new voice.
 subscribeSelect(
   settingsStore,
   (s) => s.playback.voice,
-  () => {
+  (voice) => {
     prefetch.clear();
+    itemVoiceOverride = voice;
+    if (itemId && voice) updateItem(itemId, { voice });
     if (engineState.get().status === "playing" || engineState.get().status === "loading") {
       gen++;
       cancelCurrentAudio();
@@ -582,11 +590,17 @@ export const engine = {
     docTitle = document.title;
     buildCharIndex();
     pos = normalize(startPos) ?? { chapter: 0, block: 0, sentence: 0 };
+    // Per-book memory: this book's remembered voice/speed take effect now
+    // (global defaults are untouched — new books still use them).
+    const item = getItem(id);
+    itemVoiceOverride = item?.voice ?? null;
+    const rate = item?.rate ?? settingsStore.get().playback.rate;
     patchState({
       status: "idle",
       itemId: id,
       pos,
       pct: pctOf(pos),
+      rate,
       error: null,
     });
   },
@@ -599,6 +613,7 @@ export const engine = {
     sentenceCache.clear();
     doc = null;
     itemId = null;
+    itemVoiceOverride = null;
     docTitle = "";
     reportPlaying(false);
     patchState({ status: "idle", itemId: null, pos: null, pct: 0, error: null });
@@ -703,7 +718,8 @@ export const engine = {
   },
 
   setRate(rate: number): void {
-    updatePlaybackPrefs({ rate });
+    updatePlaybackPrefs({ rate }); // global default for new books
+    if (itemId) updateItem(itemId, { rate }); // this book remembers its own
     patchState({ rate });
     if (audio) audio.playbackRate = rate;
     if (utterHandle && engineState.get().status === "playing") {

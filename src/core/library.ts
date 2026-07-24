@@ -5,7 +5,7 @@
 
 import { ipc } from "./ipc";
 import { Store } from "./store";
-import type { Bookmark, Collection, LibraryIndex, LibraryItem, Position } from "./types";
+import type { Annotation, Bookmark, Collection, LibraryIndex, LibraryItem, Position } from "./types";
 import { EMPTY_LIBRARY } from "./types";
 
 export const libraryStore = new Store<LibraryIndex>(EMPTY_LIBRARY);
@@ -120,6 +120,28 @@ export function removeBookmark(id: string, bookmarkId: string): void {
   const it = getItem(id);
   if (!it) return;
   updateItem(id, { bookmarks: it.bookmarks.filter((b) => b.id !== bookmarkId) });
+}
+
+/* ---- highlights & annotations ---- */
+
+export function addAnnotation(itemId: string, ann: Annotation): void {
+  const it = getItem(itemId);
+  if (!it) return;
+  updateItem(itemId, { annotations: [...(it.annotations ?? []), ann] });
+}
+
+export function updateAnnotation(itemId: string, annId: string, patch: Partial<Annotation>): void {
+  const it = getItem(itemId);
+  if (!it?.annotations) return;
+  updateItem(itemId, {
+    annotations: it.annotations.map((a) => (a.id === annId ? { ...a, ...patch } : a)),
+  });
+}
+
+export function removeAnnotation(itemId: string, annId: string): void {
+  const it = getItem(itemId);
+  if (!it?.annotations) return;
+  updateItem(itemId, { annotations: it.annotations.filter((a) => a.id !== annId) });
 }
 
 /* ---- collections ---- */

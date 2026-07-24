@@ -26,7 +26,7 @@ pub struct CacheStats {
 fn ext_for(provider: &str) -> Option<&'static str> {
     match provider {
         "edge" | "eleven" | "openai" | "speechify" | "deepgram" | "cartesia" => Some("mp3"),
-        "piper" | "system" => Some("wav"),
+        "piper" | "system" | "kokoro" => Some("wav"),
         _ => None,
     }
 }
@@ -117,6 +117,10 @@ pub fn synth_via_cache(provider: &str, voice_id: &str, text: &str) -> Result<Syn
             crate::tts::system::synth(voice_id, text, &staging)?;
             Ok(None)
         }
+        "kokoro" => {
+            crate::tts::kokoro::synth(voice_id, text, &staging)?;
+            Ok(None)
+        }
         "eleven" => {
             crate::tts::eleven::synth(voice_id, text, &staging)?;
             Ok(None)
@@ -155,8 +159,11 @@ pub fn synth_via_cache(provider: &str, voice_id: &str, text: &str) -> Result<Syn
     }
 
     // Keep the cache under the configured cap (never touching fresh files).
+    // 0 = unlimited (users pre-synthesizing whole libraries opt into size).
     let cap_mb = read_field_u64("cacheLimitMB").unwrap_or(DEFAULT_CAP_MB);
-    let _ = prune(cap_mb.saturating_mul(1024 * 1024));
+    if cap_mb > 0 {
+        let _ = prune(cap_mb.saturating_mul(1024 * 1024));
+    }
 
     Ok(SynthResult {
         path: audio_path.to_string_lossy().into_owned(),
@@ -284,6 +291,9 @@ pub fn cache_clear() -> Result<()> {
 
 #[tauri::command]
 pub fn cache_prune(max_bytes: u64) -> Result<()> {
+    if max_bytes == 0 {
+        return Ok(()); // unlimited
+    }
     prune(max_bytes)
 }
 

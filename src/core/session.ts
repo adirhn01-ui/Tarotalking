@@ -92,7 +92,9 @@ export function sanitizeSettings(raw: unknown): Settings {
     },
     shortcuts,
     audioQuality: oneOf(o.audioQuality, ["standard", "high"], "high"),
-    cacheLimitMB: num(o.cacheLimitMB, DEFAULT_SETTINGS.cacheLimitMB, 20, 4000),
+    miniPlayer: bool(o.miniPlayer, DEFAULT_SETTINGS.miniPlayer),
+    // 0 = unlimited (pre-synthesized libraries can be large by choice).
+    cacheLimitMB: num(o.cacheLimitMB, DEFAULT_SETTINGS.cacheLimitMB, 0, 100_000),
     closeToTray: bool(o.closeToTray, DEFAULT_SETTINGS.closeToTray),
     resumeLastItem: bool(o.resumeLastItem, DEFAULT_SETTINGS.resumeLastItem),
     notifications: bool(o.notifications, DEFAULT_SETTINGS.notifications),

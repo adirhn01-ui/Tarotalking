@@ -29,7 +29,8 @@ describe("sanitizeSettings", () => {
     expect(s.playback.rate).toBe(1.5);
     expect(s.playback.volume).toBe(1);
     expect(s.playback.highlight).toBe("word");
-    expect(s.cacheLimitMB).toBe(20);
+    // Small custom caps are allowed now (0 = unlimited).
+    expect(s.cacheLimitMB).toBe(5);
   });
 
   it("drops an off-list playback rate to 1", () => {

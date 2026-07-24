@@ -54,6 +54,26 @@ export interface Bookmark {
   createdAt: number;
 }
 
+export type AnnotationColor = "yellow" | "green" | "blue" | "pink";
+
+/** A highlighted text range (with optional note), within ONE chapter.
+ *  Char offsets index the BLOCK's plain text (same space as sentence spans). */
+export interface Annotation {
+  id: string;
+  color: AnnotationColor;
+  note?: string;
+  chapter: number;
+  /** Start block index + char offset within that block. */
+  startBlock: number;
+  startChar: number;
+  /** End block index + char offset (exclusive) within that block. */
+  endBlock: number;
+  endChar: number;
+  /** Short snippet of the highlighted text, for list display. */
+  snippet: string;
+  createdAt: number;
+}
+
 export interface LibraryItem {
   id: string;
   title: string;
@@ -81,6 +101,12 @@ export interface LibraryItem {
   progressPct: number;
   finished?: boolean;
   bookmarks: Bookmark[];
+  /** Highlights & notes. Absent on items from older versions. */
+  annotations?: Annotation[];
+  /** Per-book voice memory — overrides the global default when set. */
+  voice?: VoiceRef;
+  /** Per-book speed memory — overrides the global default when set. */
+  rate?: number;
 }
 
 export interface Collection {
@@ -106,6 +132,7 @@ export type ProviderId =
   | "system"
   | "edge"
   | "piper"
+  | "kokoro"
   | "eleven"
   | "openai"
   | "speechify"
@@ -115,7 +142,8 @@ export type ProviderId =
 export const PROVIDER_LABELS: Record<ProviderId, string> = {
   system: "System voices",
   edge: "Microsoft Edge voices",
-  piper: "Local voices",
+  piper: "Piper (local)",
+  kokoro: "Kokoro (local)",
   eleven: "ElevenLabs",
   openai: "OpenAI",
   speechify: "Speechify",
@@ -127,12 +155,35 @@ export const ALL_PROVIDER_IDS: readonly ProviderId[] = [
   "system",
   "edge",
   "piper",
+  "kokoro",
   "eleven",
   "openai",
   "speechify",
   "deepgram",
   "cartesia",
 ];
+
+/** Rough synthesized-audio size per second of speech, by provider (bytes).
+ *  Used for "how much cache will this need" estimates before pre-synthesis. */
+export function audioBytesPerSecond(provider: ProviderId, quality: AudioQuality): number {
+  switch (provider) {
+    case "edge":
+      return quality === "high" ? 12_000 : 6_000; // 96 / 48 kbps mp3
+    case "eleven":
+      return quality === "high" ? 16_000 : 12_000; // 128 / 96 kbps mp3
+    case "openai":
+    case "speechify":
+    case "deepgram":
+    case "cartesia":
+      return 16_000; // ~128 kbps mp3
+    case "system":
+      return 44_100; // 22.05 kHz 16-bit mono wav
+    case "piper":
+      return 44_100;
+    case "kokoro":
+      return 48_000; // 24 kHz 16-bit mono wav
+  }
+}
 
 /** What settings persist to pick a voice. */
 export interface VoiceRef {
@@ -238,6 +289,9 @@ export interface Settings {
   /** Synthesis quality for providers with tunable formats (Edge, ElevenLabs).
    *  Part of the audio cache key — switching re-synthesizes. */
   audioQuality: AudioQuality;
+  /** Compact now-playing bar on the library while a book plays elsewhere.
+   *  When off, leaving the reader pauses playback instead. */
+  miniPlayer: boolean;
   shortcuts: Record<string, string>;
   cacheLimitMB: number;
   closeToTray: boolean;
@@ -342,6 +396,7 @@ export const DEFAULT_SETTINGS: Settings = {
   reader: DEFAULT_READER_PREFS,
   playback: DEFAULT_PLAYBACK_PREFS,
   audioQuality: "high",
+  miniPlayer: true,
   shortcuts: { ...DEFAULT_SHORTCUTS },
   cacheLimitMB: 200,
   closeToTray: true,

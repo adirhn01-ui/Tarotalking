@@ -41,6 +41,7 @@ export interface TtsProvider {
 import { systemProvider } from "./system";
 import { edgeProvider } from "./edge";
 import { piperProvider } from "./piper";
+import { kokoroProvider } from "./kokoro";
 import { elevenProvider } from "./eleven";
 import { openaiProvider } from "./openai";
 import { speechifyProvider } from "./speechify";
@@ -51,6 +52,7 @@ const PROVIDERS: Record<ProviderId, TtsProvider> = {
   system: systemProvider,
   edge: edgeProvider,
   piper: piperProvider,
+  kokoro: kokoroProvider,
   eleven: elevenProvider,
   openai: openaiProvider,
   speechify: speechifyProvider,
@@ -67,6 +69,7 @@ export function allProviders(): TtsProvider[] {
   return [
     edgeProvider,
     systemProvider,
+    kokoroProvider,
     piperProvider,
     elevenProvider,
     openaiProvider,

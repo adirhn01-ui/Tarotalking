@@ -74,6 +74,14 @@ export interface CacheStats {
   files: number;
 }
 
+export interface KokoroStatus {
+  engineInstalled: boolean;
+  engineSizeMB: number;
+  modelInstalled: boolean;
+  modelSizeMB: number;
+  voices: { id: string; name: string; gender: string; locale: string }[];
+}
+
 export interface DebugInfo {
   autotest: boolean;
   autotestKeep: boolean;
@@ -118,6 +126,24 @@ export const ipc = {
   elevenVoices: (): Promise<VoiceInfo[]> => call("eleven_voices"),
   speechifyVoices: (): Promise<VoiceInfo[]> => call("speechify_voices"),
   cartesiaVoices: (): Promise<VoiceInfo[]> => call("cartesia_voices"),
+
+  /** Pre-synthesize sentences into the cache (skips cached ones). Progress
+   *  arrives via download-progress events under `taskId` (sentence counts).
+   *  One job at a time; returns how many sentences were synthesized. */
+  precache: (
+    provider: ProviderId,
+    voiceId: string,
+    texts: string[],
+    taskId: string,
+    label: string,
+  ): Promise<number> => call("tts_precache", { provider, voiceId, texts, taskId, label }),
+  precacheCancel: (): Promise<void> => call("tts_precache_cancel"),
+
+  /* ----- kokoro local voices ----- */
+  kokoroStatus: (): Promise<KokoroStatus> => call("kokoro_status"),
+  kokoroInstallEngine: (): Promise<void> => call("kokoro_install_engine"),
+  kokoroInstallModel: (): Promise<void> => call("kokoro_install_model"),
+  kokoroRemove: (): Promise<void> => call("kokoro_remove"),
 
   /* ----- piper local voices ----- */
   piperStatus: (): Promise<PiperStatus> => call("piper_status"),

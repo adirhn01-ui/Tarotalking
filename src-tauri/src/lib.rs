@@ -152,6 +152,7 @@ pub fn run() {
         }))
         .manage(OpenQueue(Mutex::new(Vec::new())))
         .manage(PlaybackState(Mutex::new(PlaybackFlag::default())))
+        .manage(tts::PrecacheState::default())
         .setup(|app| {
             // Asset-scope hardening: the scope check canonicalizes the
             // REQUESTED path, so when filesystem virtualization redirects our
@@ -218,6 +219,12 @@ pub fn run() {
             keys::key_delete,
             // tts
             tts::tts_synth,
+            tts::tts_precache,
+            tts::tts_precache_cancel,
+            tts::kokoro::kokoro_status,
+            tts::kokoro::kokoro_install_engine,
+            tts::kokoro::kokoro_install_model,
+            tts::kokoro::kokoro_remove,
             tts::system::system_voices,
             tts::edge::edge_voices,
             tts::eleven::eleven_voices,
