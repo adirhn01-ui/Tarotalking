@@ -1,7 +1,8 @@
 // The audio-job queue — one owner for "prepare audio" and "export audiobook"
-// work across the whole app. The backend runs a single audio job at a time and
-// shares one cancel between the two commands, so the queue serializes here:
-// asking for a second book lines it up instead of raising a busy error.
+// work across the whole app. The backend runs jobs in parallel, registering
+// each under its own task id and cancelling them individually, while a shared
+// per-provider permit pool keeps total synthesis bounded. This queue therefore
+// runs a few jobs side by side and lines the rest up behind them.
 //
 // This module also owns completion feedback (toasts + the OS notification) so
 // it fires wherever the user happens to be — the library grid, the reader, or
@@ -75,6 +76,12 @@ const TASK_PREFIX = "job-";
 
 /** Finished entries are history, not state — keep the list short. */
 const MAX_FINISHED = 20;
+
+/** How many jobs run at once. Enough that a quick chapter prepare never sits
+ *  behind a 50-hour book; few enough that the Activity list stays readable and
+ *  each running job still visibly progresses. Resource use doesn't scale with
+ *  this: the backend caps concurrent synthesis per provider regardless. */
+const MAX_PARALLEL_JOBS = 3;
 
 /** The backend emits roughly every 300ms; this only guards against a burst. */
 const PUBLISH_MS = 200;
@@ -333,7 +340,10 @@ async function run(e: Entry): Promise<void> {
       e.resultDir = result.dir;
       e.chaptersWritten = result.chaptersWritten;
     }
-    finish(e, "done");
+    // tts_precache resolves normally when cancelled (it returns however many
+    // sentences it managed), so a resolved call is only "done" if nobody
+    // asked to stop it.
+    finish(e, e.cancelRequested ? "cancelled" : "done");
   } catch (err) {
     const msg = describeError(err);
     // A cancel rejects the same call the job is awaiting — that's a settled
@@ -343,25 +353,37 @@ async function run(e: Entry): Promise<void> {
   drain();
 }
 
-/** Start the next queued job when the single backend slot is free. */
+/** Fill the free parallel slots from the queue, oldest first. */
 function drain(): void {
-  let next: Entry | null = null;
+  let running = 0;
+  const queued: Entry[] = [];
   for (const e of entries.values()) {
-    if (e.status === "running") return;
-    if (e.status === "queued" && (next === null || e.seq < next.seq)) next = e;
+    if (e.status === "running") running += 1;
+    else if (e.status === "queued") queued.push(e);
   }
-  if (next === null) return;
-  next.status = "running";
-  next.startedAt = Date.now();
-  next.samples.length = 0;
+  const slots = MAX_PARALLEL_JOBS - running;
+  if (slots <= 0 || queued.length === 0) return;
+
+  queued.sort((a, b) => a.seq - b.seq);
+  const starting = queued.slice(0, slots);
+  const now = Date.now();
+  for (const e of starting) {
+    e.status = "running";
+    e.startedAt = now;
+    e.samples.length = 0;
+  }
+  // One publish for the whole batch, then hand them to the backend. Each job
+  // carries its own `job-<id>` task id, so their progress events and cancels
+  // stay independent.
   publish();
-  void run(next);
+  for (const e of starting) void run(e);
 }
 
 /* ================= public API ================= */
 
-/** Enqueue; starts the runner if idle. If an active (queued|running) job with
- *  the same itemId+kind exists, returns that job's id and adds nothing. */
+/** Enqueue; starts running immediately when a parallel slot is free. If an
+ *  active (queued|running) job with the same itemId+kind+scope exists, returns
+ *  that job's id and adds nothing. */
 export function enqueue(spec: JobSpec): string {
   for (const e of entries.values()) {
     if (
@@ -397,7 +419,7 @@ export function enqueue(spec: JobSpec): string {
   return id;
 }
 
-/** Queued → drop it. Running → ipc.precacheCancel(). Finished → no-op. */
+/** Queued → drop it. Running → cancel just that task. Finished → no-op. */
 export function cancelJob(jobId: string): void {
   const e = entries.get(jobId);
   if (!e) return;
@@ -408,9 +430,9 @@ export function cancelJob(jobId: string): void {
   }
   if (e.status !== "running" || e.cancelRequested) return;
   e.cancelRequested = true;
-  // The backend shares one cancel between precache and export; a rejection
-  // here (nothing running any more) is harmless.
-  void ipc.precacheCancel().catch(() => {});
+  // Cancel by task id so the other running jobs keep going. A rejection here
+  // (this job just finished) is harmless.
+  void ipc.precacheCancel(`${TASK_PREFIX}${e.id}`).catch(() => {});
 }
 
 /** Drop all finished (done|failed|cancelled) entries. */

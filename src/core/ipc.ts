@@ -147,7 +147,10 @@ export const ipc = {
 
   /** Pre-synthesize sentences into the cache (skips cached ones). Progress
    *  arrives via download-progress events under `taskId` (sentence counts).
-   *  One job at a time; returns how many sentences were synthesized. */
+   *  Several jobs may run at once — they share one bounded synthesis budget per
+   *  provider — but a `taskId` already running is rejected. Returns how many
+   *  sentences were synthesized; note it RESOLVES (with a partial count) when
+   *  cancelled rather than rejecting. */
   precache: (
     provider: ProviderId,
     voiceId: string,
@@ -155,13 +158,15 @@ export const ipc = {
     taskId: string,
     label: string,
   ): Promise<number> => call("tts_precache", { provider, voiceId, texts, taskId, label }),
-  precacheCancel: (): Promise<void> => call("tts_precache_cancel"),
+  /** Stop one audio job by its task id, or every running job when omitted. */
+  precacheCancel: (taskId?: string): Promise<void> =>
+    call("tts_precache_cancel", { taskId: taskId ?? null }),
 
   /** Export a book as per-chapter tagged MP3 files. Reuses the audio cache
    *  (only missing sentences synthesize). Progress arrives via
    *  download-progress events under `taskId` (units: sentences + one per
-   *  chapter stitched); shares the one-job-at-a-time guard and cancel with
-   *  precache (cancel via precacheCancel). */
+   *  chapter stitched); shares the job registry and the per-provider synthesis
+   *  budget with precache (cancel via precacheCancel with this taskId). */
   exportAudiobook: (req: {
     itemId: string;
     provider: ProviderId;

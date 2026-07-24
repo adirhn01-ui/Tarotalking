@@ -1,8 +1,10 @@
 // Export audiobook: synthesize any missing sentences into the shared audio
 // cache (phase 1, via the same worker pool precache uses), then stitch each
-// chapter into one tagged MP3 file on disk (phase 2). Shares the single
-// audio-job slot and cancel bridge with precache, so tts_precache_cancel
-// cancels an export in progress too.
+// chapter into one tagged MP3 file on disk (phase 2). Registers in the same
+// job registry as precache and draws on the same per-provider synthesis permit
+// pool, so an export running next to a prepare splits one bounded budget rather
+// than doubling it. Phase 2 is local CPU work and takes no permit.
+// tts_precache_cancel(taskId) cancels this export alone.
 
 use crate::error::{AppError, Result};
 use crate::tts::{self, PrecacheState};
@@ -60,7 +62,7 @@ pub async fn export_audiobook(
     state: tauri::State<'_, PrecacheState>,
     req: ExportRequest,
 ) -> Result<ExportResult> {
-    // Validate up front, before claiming the shared job slot.
+    // Validate up front, before registering the job.
     let item_dir = crate::paths::item_dir(&req.item_id)?;
     let dest = PathBuf::from(&req.dest_dir);
     if !dest.is_dir() {
@@ -80,17 +82,18 @@ pub async fn export_audiobook(
     }
     let is_wav = provider_is_wav(&req.provider)?;
 
-    let cancel = tts::claim_job(&state, &req.task_id, "Another audio job is already running")?;
+    // Held for the whole command: dropping it deregisters the job on every exit
+    // path, so no failure mode can leave a phantom entry behind.
+    let job = tts::claim_job(&state, &req.task_id)?;
+    let cancel = job.cancel_flag();
 
-    let result = tauri::async_runtime::spawn_blocking(move || {
+    tauri::async_runtime::spawn_blocking(move || {
         run_export(&app, &item_dir, &req, is_wav, &cancel)
     })
     .await
     .map_err(|e| AppError::wrap("Export task", e))
-    .and_then(|r| r);
-
-    tts::release_job(&state);
-    result
+    .and_then(|r| r)
+    // `job` drops here — deregistering is unmissable.
 }
 
 /// The full export, run off the async runtime. Emits a single terminal
@@ -128,7 +131,8 @@ fn run_export(
     };
     emit(0, false, None);
 
-    // Phase 1 — synthesize every missing sentence into the cache.
+    // Phase 1 — synthesize every missing sentence into the cache, through the
+    // provider's shared permit pool (see tts::run_synth_pool).
     let (_, first_error) = tts::run_synth_pool(
         &req.provider,
         &req.voice_id,
@@ -147,7 +151,8 @@ fn run_export(
     // Phase 1 complete: every unique sentence is cached.
     emit(unique, false, None);
 
-    // Phase 2 — stitch one tagged MP3 per chapter.
+    // Phase 2 — stitch one tagged MP3 per chapter. Phase 1 already cached every
+    // sentence, so this is pure local decode/encode work: no permit, no network.
     let sanitized_book = sanitize(&req.book_title, "Audiobook");
     let out_root = Path::new(&req.dest_dir).join(&sanitized_book);
     crate::paths::ensure_dir(&out_root)?;

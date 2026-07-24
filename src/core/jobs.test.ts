@@ -1,8 +1,10 @@
 // Audio-job queue: the pure ETA math plus the queue semantics the whole app
-// leans on (one job at a time, FIFO, dedupe, cancel, capped history). The IPC
-// layer is mocked so the runner can be driven deterministically.
+// leans on (up to three jobs at once, FIFO behind that, dedupe, per-job cancel,
+// per-job progress routing, capped history). The IPC layer is mocked so the
+// runner can be driven deterministically.
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { DownloadProgress } from "./ipc";
 import type { ExportSpec, JobSample, PrepareSpec } from "./jobs";
 
 const mocks = vi.hoisted(() => ({
@@ -11,6 +13,8 @@ const mocks = vi.hoisted(() => ({
   precacheCancel: vi.fn(),
   toastInfo: vi.fn(),
   toastError: vi.fn(),
+  /** The queue's download-progress listener, captured on first enqueue. */
+  progress: null as null | ((p: DownloadProgress) => void),
 }));
 
 vi.mock("./ipc", () => ({
@@ -19,7 +23,10 @@ vi.mock("./ipc", () => ({
     exportAudiobook: mocks.exportAudiobook,
     precacheCancel: mocks.precacheCancel,
   },
-  onDownloadProgress: () => Promise.resolve(() => {}),
+  onDownloadProgress: (cb: (p: DownloadProgress) => void) => {
+    mocks.progress = cb;
+    return Promise.resolve(() => {});
+  },
   describeError: (e: unknown) => (e instanceof Error ? e.message : String(e)),
 }));
 
@@ -78,9 +85,24 @@ function exp(itemId: string): ExportSpec {
   };
 }
 
+/** Feed one backend progress event to the queue's listener. */
+function emitProgress(taskId: string, received: number, total: number | null = null): void {
+  mocks.progress?.({ taskId, label: "", received, total, done: false, error: null });
+}
+
+/** Progress ticks publish on a 200ms throttle; wait it out before asserting. */
+function settlePublish(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 260));
+}
+
 beforeEach(async () => {
   vi.resetModules();
-  for (const m of Object.values(mocks)) m.mockReset();
+  mocks.precache.mockReset();
+  mocks.exportAudiobook.mockReset();
+  mocks.precacheCancel.mockReset();
+  mocks.toastInfo.mockReset();
+  mocks.toastError.mockReset();
+  mocks.progress = null;
   mocks.precacheCancel.mockResolvedValue(undefined);
   jobs = await import("./jobs");
 });
@@ -163,39 +185,59 @@ describe("secondsLeftFromSamples", () => {
 });
 
 describe("job queue", () => {
-  it("starts the first job immediately and keeps the rest queued FIFO", async () => {
-    const first = deferred<number>();
-    mocks.precache.mockReturnValueOnce(first.promise).mockResolvedValue(0);
+  it("runs three jobs at once and keeps the rest queued FIFO", async () => {
+    const held = Array.from({ length: 5 }, () => deferred<number>());
+    let n = 0;
+    mocks.precache.mockImplementation(() => held[n++]!.promise);
 
-    jobs.enqueue(prep("a"));
-    jobs.enqueue(prep("b"));
-    jobs.enqueue(prep("c"));
+    for (const id of ["a", "b", "c", "d", "e"]) jobs.enqueue(prep(id));
+    const byItem = (itemId: string) =>
+      jobs.jobsStore.get().jobs.find((j) => j.itemId === itemId);
 
     const list = jobs.jobsStore.get().jobs;
-    expect(list.map((j) => j.itemId)).toEqual(["a", "b", "c"]);
-    expect(list.map((j) => j.status)).toEqual(["running", "queued", "queued"]);
-    expect(mocks.precache).toHaveBeenCalledTimes(1);
-
-    first.resolve(0);
-    await flush();
+    expect(list.map((j) => j.itemId)).toEqual(["a", "b", "c", "d", "e"]);
+    expect(list.map((j) => j.status)).toEqual([
+      "running",
+      "running",
+      "running",
+      "queued",
+      "queued",
+    ]);
     expect(mocks.precache).toHaveBeenCalledTimes(3);
+
+    // Freeing one slot admits exactly one more, the oldest queued.
+    held[0]!.resolve(0);
+    await flush();
+    expect(mocks.precache).toHaveBeenCalledTimes(4);
+    expect(byItem("a")?.status).toBe("done");
+    expect(byItem("d")?.status).toBe("running");
+    expect(byItem("e")?.status).toBe("queued");
+
+    held[1]!.resolve(0);
+    await flush();
+    expect(mocks.precache).toHaveBeenCalledTimes(5);
+    expect(byItem("e")?.status).toBe("running");
+
+    for (const d of held.slice(2)) d.resolve(0);
+    await flush();
     expect(jobs.activeCount()).toBe(0);
   });
 
-  it("never runs two jobs at once", async () => {
-    const first = deferred<number>();
-    mocks.precache.mockReturnValueOnce(first.promise).mockResolvedValue(0);
+  it("never runs more than three jobs at once", async () => {
+    const pending = Array.from({ length: 3 }, () => deferred<number>());
+    let n = 0;
+    mocks.precache.mockImplementation(() => pending[n++]?.promise ?? Promise.resolve(0));
 
-    jobs.enqueue(prep("a"));
-    const bId = jobs.enqueue(prep("b"));
+    for (let i = 0; i < 8; i++) jobs.enqueue(prep(`item-${i}`));
     await flush();
 
-    expect(mocks.precache).toHaveBeenCalledTimes(1);
-    expect(jobs.jobsStore.get().jobs.find((j) => j.id === bId)?.status).toBe("queued");
+    expect(mocks.precache).toHaveBeenCalledTimes(3);
+    expect(jobs.jobsStore.get().jobs.filter((j) => j.status === "running")).toHaveLength(3);
+    expect(jobs.jobsStore.get().jobs.filter((j) => j.status === "queued")).toHaveLength(5);
 
-    first.resolve(0);
+    for (const p of pending) p.resolve(0);
     await flush();
-    expect(jobs.jobsStore.get().jobs.find((j) => j.id === bId)?.status).toBe("done");
+    expect(jobs.activeCount()).toBe(0);
   });
 
   it("orders finished entries newest-first behind the active ones", async () => {
@@ -263,23 +305,25 @@ describe("job queue", () => {
   });
 
   it("drops a queued job on cancel without touching IPC", async () => {
-    const first = deferred<number>();
-    mocks.precache.mockReturnValueOnce(first.promise).mockResolvedValue(0);
+    const held = deferred<number>();
+    mocks.precache.mockReturnValue(held.promise);
 
-    jobs.enqueue(prep("a"));
-    const bId = jobs.enqueue(prep("b"));
-    jobs.cancelJob(bId);
+    // Fill the three parallel slots so the fourth is genuinely queued.
+    for (const id of ["a", "b", "c"]) jobs.enqueue(prep(id));
+    const dId = jobs.enqueue(prep("d"));
+    expect(jobs.jobsStore.get().jobs.find((j) => j.id === dId)?.status).toBe("queued");
 
-    expect(jobs.jobsStore.get().jobs.map((j) => j.itemId)).toEqual(["a"]);
+    jobs.cancelJob(dId);
+    expect(jobs.jobsStore.get().jobs.map((j) => j.itemId)).toEqual(["a", "b", "c"]);
     expect(mocks.precacheCancel).not.toHaveBeenCalled();
-    expect(jobs.jobForItem("b")).toBeNull();
+    expect(jobs.jobForItem("d")).toBeNull();
 
-    first.resolve(0);
+    held.resolve(0);
     await flush();
-    expect(mocks.precache).toHaveBeenCalledTimes(1);
+    expect(mocks.precache).toHaveBeenCalledTimes(3);
   });
 
-  it("cancels the running job through IPC exactly once", async () => {
+  it("cancels the running job through IPC exactly once, by task id", async () => {
     const first = deferred<number>();
     mocks.precache.mockReturnValue(first.promise);
 
@@ -287,11 +331,93 @@ describe("job queue", () => {
     jobs.cancelJob(id);
     jobs.cancelJob(id);
     expect(mocks.precacheCancel).toHaveBeenCalledTimes(1);
+    expect(mocks.precacheCancel).toHaveBeenCalledWith(`job-${id}`);
 
     first.reject(new Error("Cancelled"));
     await flush();
     expect(jobs.jobsStore.get().jobs[0]?.status).toBe("cancelled");
     expect(mocks.toastError).not.toHaveBeenCalled();
+  });
+
+  it("cancels one running job without disturbing the others", async () => {
+    const held = [deferred<number>(), deferred<number>(), deferred<number>()];
+    let n = 0;
+    mocks.precache.mockImplementation(() => held[n++]!.promise);
+
+    const [aId, bId, cId] = [
+      jobs.enqueue(prep("a")),
+      jobs.enqueue(prep("b")),
+      jobs.enqueue(prep("c")),
+    ];
+
+    jobs.cancelJob(bId);
+    expect(mocks.precacheCancel).toHaveBeenCalledTimes(1);
+    expect(mocks.precacheCancel).toHaveBeenCalledWith(`job-${bId}`);
+
+    // b settles as cancelled; a and c are untouched and still running.
+    held[1]!.resolve(1);
+    await flush();
+    const byId = (id: string) => jobs.jobsStore.get().jobs.find((j) => j.id === id);
+    expect(byId(bId)?.status).toBe("cancelled");
+    expect(byId(aId)?.status).toBe("running");
+    expect(byId(cId)?.status).toBe("running");
+
+    held[0]!.resolve(0);
+    held[2]!.resolve(0);
+    await flush();
+    expect(byId(aId)?.status).toBe("done");
+    expect(byId(cId)?.status).toBe("done");
+    expect(mocks.precacheCancel).toHaveBeenCalledTimes(1);
+  });
+
+  it("counts a resolved precache as done only when no cancel was requested", async () => {
+    // tts_precache RESOLVES when cancelled — it returns the sentences it did
+    // finish — so the resolve path must respect the cancel request.
+    const cancelled = deferred<number>();
+    const clean = deferred<number>();
+    mocks.precache.mockReturnValueOnce(cancelled.promise).mockReturnValueOnce(clean.promise);
+
+    const aId = jobs.enqueue(prep("a"));
+    const bId = jobs.enqueue(prep("b"));
+
+    jobs.cancelJob(aId);
+    cancelled.resolve(7); // partial count, not a rejection
+    clean.resolve(2);
+    await flush();
+
+    const byId = (id: string) => jobs.jobsStore.get().jobs.find((j) => j.id === id);
+    expect(byId(aId)?.status).toBe("cancelled");
+    expect(byId(bId)?.status).toBe("done");
+    expect(mocks.toastError).not.toHaveBeenCalled();
+  });
+
+  it("routes parallel progress events to the job named by the task id", async () => {
+    const held = [deferred<number>(), deferred<number>()];
+    let n = 0;
+    mocks.precache.mockImplementation(() => held[n++]!.promise);
+
+    const aId = jobs.enqueue(prep("a", ["one", "two", "three", "four"]));
+    const bId = jobs.enqueue(prep("b", ["one", "two", "three", "four"]));
+
+    emitProgress(`job-${aId}`, 3);
+    emitProgress(`job-${bId}`, 1);
+    // A backend total overrides the local estimate — for that job only.
+    emitProgress(`job-${bId}`, 2, 9);
+    // Foreign task ids (voice/model installs) and unknown jobs are ignored.
+    emitProgress("voice-install", 99, 99);
+    emitProgress("job-nope", 99, 99);
+    await settlePublish();
+
+    const byId = (id: string) => jobs.jobsStore.get().jobs.find((j) => j.id === id);
+    expect(byId(aId)?.received).toBe(3);
+    expect(byId(bId)?.received).toBe(2);
+    expect(byId(aId)?.total).toBe(4);
+    expect(byId(bId)?.total).toBe(9);
+    expect(jobs.jobsStore.get().jobs).toHaveLength(2);
+
+    held[0]!.resolve(0);
+    held[1]!.resolve(0);
+    await flush();
   });
 
   it("treats a cancel-shaped rejection as cancelled and anything else as failed", async () => {
@@ -363,20 +489,24 @@ describe("job queue", () => {
 
   it("jobForItem prefers the running job and activeCount counts both states", async () => {
     const running = deferred<number>();
+    const exportRunning = deferred<{ dir: string; chaptersWritten: number }>();
     mocks.precache.mockReturnValue(running.promise);
-    mocks.exportAudiobook.mockResolvedValue({ dir: "D:/out", chaptersWritten: 2 });
+    mocks.exportAudiobook.mockReturnValue(exportRunning.promise);
 
+    // Three fill the parallel slots; "b" lands behind them, still queued.
     jobs.enqueue(prep("a"));
     jobs.enqueue(exp("a"));
+    jobs.enqueue(prep("filler"));
     jobs.enqueue(prep("b"));
 
-    expect(jobs.activeCount()).toBe(3);
+    expect(jobs.activeCount()).toBe(4);
     expect(jobs.jobForItem("a")?.kind).toBe("prepare");
     expect(jobs.jobForItem("a")?.status).toBe("running");
     expect(jobs.jobForItem("b")?.status).toBe("queued");
     expect(jobs.jobForItem("nope")).toBeNull();
 
     running.resolve(0);
+    exportRunning.resolve({ dir: "D:/out", chaptersWritten: 2 });
     await flush();
     expect(jobs.activeCount()).toBe(0);
     expect(jobs.jobForItem("a")).toBeNull();

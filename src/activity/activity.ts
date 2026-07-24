@@ -213,7 +213,9 @@ export function mountActivity(el: HTMLElement): ActivityView {
   const resultDirs = new Map<string, string>();
   // What each rendered row currently shows, so a tick can skip untouched rows.
   const shown = new Map<string, { received: number; total: number }>();
-  let signature = "";
+  // null, not "": an empty job list also keys to "", and starting equal to it
+  // would skip the very first render and leave the page blank.
+  let signature: string | null = null;
 
   // Rows are replaced wholesale whenever the list changes shape, so per-row
   // listeners would need rebinding every time: one delegated handler instead.
