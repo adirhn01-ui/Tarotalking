@@ -6,7 +6,7 @@
 
 import "./library.css";
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { describeError, ipc, onDownloadProgress } from "../core/ipc";
+import { describeError, ipc, onDownloadProgress, type ExportChapterPayload } from "../core/ipc";
 import {
   addCollection,
   getItem,
@@ -21,12 +21,21 @@ import { escapeHtml, formatBytes, formatTimeLeft, readingMinutes } from "../core
 import { loadDoc } from "../core/import";
 import { splitSentences } from "../core/segment";
 import { settingsStore } from "../core/session";
-import type { AudioQuality, LibraryIndex, LibraryItem, ProviderId, SourceType } from "../core/types";
+import type {
+  AudioQuality,
+  ContentDoc,
+  LibraryIndex,
+  LibraryItem,
+  ProviderId,
+  SourceType,
+} from "../core/types";
 import { audioBytesPerSecond, POSITION_ZERO } from "../core/types";
+import { subscribeSelect } from "../core/store";
 import { trapTab } from "../ui/focus";
 import { icon } from "../ui/icons";
 import { closeMenu, showMenu, type MenuItem } from "../ui/menu";
 import { toast } from "../ui/toast";
+import { openExportDialog, type ExportChoice } from "./export-dialog";
 import { mountMiniPlayer } from "./mini-player";
 
 export interface LibraryView {
@@ -46,7 +55,25 @@ const GRAD_COUNT = 8;
 // backend runs one precache job at a time. The active library view registers
 // its re-render here so module-level actions can refresh cards.
 const precacheProgress = new Map<string, { received: number; total: number }>();
+// Whole-book "export audiobook" progress, keyed by item id — same one-job-at-a-
+// time backend as precache (they share the cancel), so at most one of these two
+// maps holds an entry at a time. Drives the same per-card overlay.
+const exportProgress = new Map<string, { received: number; total: number }>();
 let notifyRender: () => void = () => {};
+
+/** True while any audio job (prepare or export) is running. */
+function anyAudioJobRunning(): boolean {
+  return precacheProgress.size > 0 || exportProgress.size > 0;
+}
+
+/** The per-card progress overlay for an item, whichever job feeds it. */
+function cardOverlay(id: string): { received: number; total: number; label: string } | null {
+  const p = precacheProgress.get(id);
+  if (p) return { received: p.received, total: p.total, label: "Preparing audio" };
+  const e = exportProgress.get(id);
+  if (e) return { received: e.received, total: e.total, label: "Exporting audio" };
+  return null;
+}
 
 /** Rough size (bytes) to pre-synthesize a whole book, from its word count:
  *  listeningSeconds = words / 155 wpm × 60, times the provider's bytes-per-second
@@ -71,7 +98,7 @@ function prepareEstimate(item: LibraryItem): number {
 /** Update just one card's prepare-overlay fill in place (avoids a full grid
  *  re-render on every per-sentence progress tick). */
 function updateCardProgress(id: string): void {
-  const prog = precacheProgress.get(id);
+  const prog = cardOverlay(id);
   if (!prog) return;
   const fill = document.querySelector<HTMLElement>(`.lib-card[data-id="${id}"] .lib-prep__fill`);
   if (fill) fill.style.width = `${prog.total > 0 ? Math.round((prog.received / prog.total) * 100) : 0}%`;
@@ -120,6 +147,105 @@ async function prepareAudio(item: LibraryItem): Promise<void> {
     const msg = describeError(e);
     if (msg !== "Cancelled") toast.error(msg);
   }
+}
+
+/* ================= export audiobook ================= */
+
+/** One ExportChapterPayload per non-empty chapter. Segmentation mirrors the
+ *  player/precache path EXACTLY (same splitSentences over the same speakable
+ *  blocks) so exported sentences hit the same cache entries. */
+function buildExportChapters(doc: ContentDoc): ExportChapterPayload[] {
+  const out: ExportChapterPayload[] = [];
+  doc.chapters.forEach((ch, i) => {
+    const texts: string[] = [];
+    for (const b of ch.blocks) {
+      if (b.t === "img" || b.t === "hr") continue;
+      if (typeof b.text !== "string" || b.text.trim().length === 0) continue;
+      for (const s of splitSentences(b.text)) texts.push(s.text);
+    }
+    if (texts.length === 0) return; // skip empty chapters
+    out.push({ title: ch.title && ch.title.trim() ? ch.title : `Chapter ${i + 1}`, texts });
+  });
+  return out;
+}
+
+/** Post-export OS notification (best-effort; gated on the notifications
+ *  setting, mirroring the Rust close-to-tray notification). */
+async function notifyExported(title: string, dir: string): Promise<void> {
+  if (!settingsStore.get().notifications) return;
+  try {
+    const { isPermissionGranted, requestPermission, sendNotification } = await import(
+      "@tauri-apps/plugin-notification"
+    );
+    let granted = await isPermissionGranted();
+    if (!granted) granted = (await requestPermission()) === "granted";
+    if (granted) sendNotification({ title: "Audiobook exported", body: `${title} · ${dir}` });
+  } catch {
+    // Notifications are a nicety — never let one break the export flow.
+  }
+}
+
+async function startExport(item: LibraryItem, choice: ExportChoice): Promise<void> {
+  // The backend runs one job at a time; if another is already going, let it
+  // reject and surface the message without clobbering that job's overlay.
+  const otherRunning = anyAudioJobRunning() && !exportProgress.has(item.id);
+  let doc: ContentDoc;
+  try {
+    doc = await loadDoc(item.id);
+  } catch (e) {
+    toast.error(describeError(e));
+    return;
+  }
+  const chapters = buildExportChapters(doc);
+  if (chapters.length === 0) {
+    toast.error("This item has no readable text to export");
+    return;
+  }
+  // Units the backend reports: one per sentence synthesized + one per chapter
+  // stitched. Optimistic total so the bar starts sensibly; events refine it.
+  const total = chapters.reduce((n, c) => n + c.texts.length, 0) + chapters.length;
+  if (!otherRunning) {
+    exportProgress.set(item.id, { received: 0, total });
+    notifyRender();
+  }
+  try {
+    const result = await ipc.exportAudiobook({
+      itemId: item.id,
+      provider: choice.voice.provider,
+      voiceId: choice.voice.id,
+      bookTitle: item.title,
+      author: item.author ?? null,
+      chapters,
+      destDir: choice.destDir,
+      taskId: `export-item-${item.id}`,
+      label: item.title,
+    });
+    // Overlay removal is normally driven by the download-progress 'done'
+    // event; clear defensively if that was missed.
+    if (exportProgress.has(item.id)) {
+      exportProgress.delete(item.id);
+      notifyRender();
+    }
+    toast.info("Audiobook exported");
+    void notifyExported(item.title, result.dir);
+  } catch (e) {
+    if (!otherRunning) {
+      exportProgress.delete(item.id);
+      notifyRender();
+    }
+    const msg = describeError(e);
+    if (msg === "Cancelled") toast.info("Export cancelled — finished chapters were kept");
+    else toast.error(msg);
+  }
+}
+
+function openExport(item: LibraryItem): void {
+  const busy = anyAudioJobRunning();
+  openExportDialog({
+    item,
+    busyReason: busy ? "Another audio task is running — wait for it to finish." : null,
+    onExport: (choice) => void startExport(item, choice),
+  });
 }
 
 /* ================= pure card helpers ================= */
@@ -192,9 +318,9 @@ function cardHtml(item: LibraryItem): string {
   else if (pct > 0) foot = `<div class="lib-card__bar"><span style="width:${Math.round(pct * 100)}%"></span></div>`;
 
   const sub = subLine(item);
-  const prep = precacheProgress.get(item.id);
-  const prepHtml = prep
-    ? `<div class="lib-prep"><div class="lib-prep__track"><span class="lib-prep__fill" style="width:${prep.total > 0 ? Math.round((prep.received / prep.total) * 100) : 0}%"></span></div><span class="lib-prep__label">Preparing audio</span></div>`
+  const overlay = cardOverlay(item.id);
+  const prepHtml = overlay
+    ? `<div class="lib-prep"><div class="lib-prep__track"><span class="lib-prep__fill" style="width:${overlay.total > 0 ? Math.round((overlay.received / overlay.total) * 100) : 0}%"></span></div><span class="lib-prep__label">${overlay.label}</span></div>`
     : "";
   return `<div class="lib-card" data-id="${escapeHtml(item.id)}" tabindex="0" role="button" title="${escapeHtml(item.title)}">
       <div class="lib-card__cover">
@@ -223,6 +349,35 @@ function railCardHtml(item: LibraryItem): string {
         <div class="lib-rail__left">${escapeHtml(left)}</div>
       </div>
     </button>`;
+}
+
+/** Everything the library view renders, as one comparable string — with
+ *  progress bucketed to whole percents and the per-tick position objects
+ *  excluded. Playback persists a position every few seconds while the
+ *  mini-player runs; without this, each tick rebuilt the entire grid. A
+ *  re-render now happens only when something visible actually changed. */
+function librarySignature(idx: LibraryIndex): string {
+  const items = idx.items
+    .map((i) =>
+      [
+        i.id,
+        i.title,
+        i.author ?? "",
+        i.cover ?? "",
+        i.sourceType,
+        i.sourceUrl ?? "",
+        i.favorite ? 1 : 0,
+        i.finished ? 1 : 0,
+        i.wordCount,
+        i.lastOpenedAt ?? 0,
+        Math.round(i.progressPct * 100),
+        i.chapterLabel ?? "",
+        i.collections.join(","),
+      ].join(""),
+    )
+    .join("\n");
+  const cols = idx.collections.map((c) => `${c.id}${c.name}`).join("\n");
+  return `${items}${cols}`;
 }
 
 /* ================= filtering + sorting ================= */
@@ -581,10 +736,14 @@ function openItemMenu(item: LibraryItem, x: number, y: number): void {
         label: `Prepare audio (~${formatBytes(prepareEstimate(item))})`,
         onSelect: () => void prepareAudio(item),
       };
+  const exportItem: MenuItem = exportProgress.has(item.id)
+    ? { label: "Cancel exporting", onSelect: () => void ipc.precacheCancel().catch(() => {}) }
+    : { label: "Export audiobook", onSelect: () => openExport(item) };
   const items: MenuItem[] = [
     { label: "Resume reading", onSelect: () => openItem(item.id) },
     { label: "Play from current position", onSelect: () => openItem(item.id) },
     prepareItem,
+    exportItem,
     {
       label: item.favorite ? "Remove from favorites" : "Add to favorites",
       onSelect: () => updateItem(item.id, { favorite: !item.favorite }),
@@ -852,6 +1011,22 @@ export function mountLibrary(el: HTMLElement): LibraryView {
   let disposed = false;
   let unlistenProgress: (() => void) | null = null;
   void onDownloadProgress((p) => {
+    const exp = /^export-item-(.+)$/.exec(p.taskId);
+    if (exp) {
+      const id = exp[1]!;
+      if (p.done) {
+        // The success toast + notification (and cancel/error toasts) are
+        // raised where startExport's call settles — it carries the result dir.
+        exportProgress.delete(id);
+        render();
+        return;
+      }
+      const had = exportProgress.has(id);
+      exportProgress.set(id, { received: p.received, total: p.total ?? 0 });
+      if (had) updateCardProgress(id);
+      else render();
+      return;
+    }
     const m = /^precache-item-(.+)$/.exec(p.taskId);
     if (!m) return;
     const id = m[1]!;
@@ -875,7 +1050,7 @@ export function mountLibrary(el: HTMLElement): LibraryView {
     else unlistenProgress = un;
   });
 
-  const unsubscribe = libraryStore.subscribe(() => render());
+  const unsubscribe = subscribeSelect(libraryStore, librarySignature, () => render());
   render();
 
   return {

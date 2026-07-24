@@ -1,6 +1,6 @@
 [package]
 name = "tarotalking"
-version = "0.5.0"
+version = "0.5.1"
 description = "Fast, lightweight desktop reading and text-to-speech app"
 edition = "2021"
 license = "GPL-3.0-or-later"
@@ -42,6 +42,11 @@ base64 = "0.22"
 log = "0.4"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 uuid = { version = "1", features = ["v4"] }
+# Audiobook export: stitch cached sentence audio into per-chapter MP3s.
+# mp3lame-encoder vendors libmp3lame (built via cc, MSVC-friendly) so WAV
+# local voices (Kokoro/Piper) can be re-encoded to MP3; id3 writes ID3v2 tags.
+mp3lame-encoder = "0.2"
+id3 = "1"
 
 [profile.release]
 opt-level = "s"

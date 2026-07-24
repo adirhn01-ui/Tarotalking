@@ -281,6 +281,86 @@ export async function runAutotest(): Promise<void> {
         "library view with fixture item",
       );
     });
+
+    await test("export-audiobook", async () => {
+      assert(epubId, "no epub imported");
+      const avail = await getProvider("system").availability();
+      if (!avail.ok) return `skipped: ${avail.reason ?? "system voices unavailable"}`;
+      const voices = await getProvider("system").voices();
+      assert(voices.length > 0, "no system voices");
+      const voiceId = voices[0]!.id;
+
+      // Build a ONE-chapter payload from the fixture's first chapter, with the
+      // exact same segmentation the player/precache path uses.
+      const doc = await loadDoc(epubId);
+      const ch = doc.chapters[0]!;
+      const texts: string[] = [];
+      for (const b of ch.blocks) {
+        if (b.t === "img" || b.t === "hr") continue;
+        if (typeof b.text !== "string" || b.text.trim().length === 0) continue;
+        for (const s of splitSentences(b.text)) texts.push(s.text);
+      }
+      assert(texts.length > 0, "first chapter has no speakable sentences");
+      const title = ch.title && ch.title.trim() ? ch.title : "Chapter 1";
+      const destDir = `${info.fixturesDir}\\export-e2e-${Date.now()}`;
+
+      // Bound the call so a backend hang fails this block meaningfully instead
+      // of stalling the whole suite.
+      const result = await Promise.race([
+        ipc.exportAudiobook({
+          itemId: epubId,
+          provider: "system",
+          voiceId,
+          bookTitle: "The Fixture Book",
+          author: null,
+          chapters: [{ title, texts }],
+          destDir,
+          taskId: `export-item-${epubId}`,
+          label: "The Fixture Book",
+        }),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error("export timed out after 45s")), 45_000),
+        ),
+      ]);
+
+      assert(typeof result.dir === "string" && result.dir.length > 0, "no export dir returned");
+      assert(result.chaptersWritten === 1, `chaptersWritten: ${result.chaptersWritten}`);
+
+      // The frozen IPC surface has no directory listing, so locate the single
+      // written file by its (index-prefixed, title-based) name and read it with
+      // readFileBytes, which works on any path. chaptersWritten === 1 stands in
+      // for "exactly one file".
+      const candidates = [
+        `${result.dir}\\01 - ${title}.mp3`,
+        `${result.dir}\\01 ${title}.mp3`,
+        `${result.dir}\\01. ${title}.mp3`,
+        `${result.dir}\\1 - ${title}.mp3`,
+        `${result.dir}\\001 - ${title}.mp3`,
+        `${result.dir}\\${title}.mp3`,
+        `${result.dir}\\Chapter 1.mp3`,
+        `${result.dir}\\01.mp3`,
+      ];
+      let bytes: Uint8Array | null = null;
+      let readPath = "";
+      for (const path of candidates) {
+        try {
+          bytes = await ipc.readFileBytes(path);
+          readPath = path;
+          break;
+        } catch {
+          /* try the next naming convention */
+        }
+      }
+      assert(bytes, `no .mp3 found under ${result.dir} (tried ${candidates.length} names)`);
+      assert(bytes.length > 1000, `mp3 too small: ${bytes.length} bytes`);
+      const head = String.fromCharCode(bytes[0]!, bytes[1]!, bytes[2]!);
+      assert(head === "ID3", `expected an ID3 tag, got "${head}"`);
+
+      // Best-effort cleanup: the frozen IPC exposes no arbitrary-path delete
+      // (deleteItem only removes library item dirs), so the unique per-run dir
+      // name is what keeps runs from colliding — nothing to remove here.
+      return `wrote ${bytes.length} bytes: ${readPath.slice(readPath.lastIndexOf("\\") + 1)}`;
+    });
   } finally {
     // Teardown: remove everything the harness created — unless keep mode
     // (TAROTALKING_AUTOTEST=2) wants the fixture left open for visual passes.

@@ -48,6 +48,10 @@ The free path — Edge, System, and the local engines — is always the default 
 - Each book remembers its own voice and speed
 - A home-screen mini-player keeps playback going while you browse the library
 - Standard/High audio quality setting for the network providers
+- **Export any book as an audiobook**: per-chapter MP3 files with proper tags,
+  chapter names, and cover art — synthesized once with the voice you choose,
+  then playable in any audiobook app on any device (already-prepared audio is
+  reused, so exports of books you've listened to are fast)
 
 **Desktop integration**
 - Media keys and system media controls (play, pause, next, previous)

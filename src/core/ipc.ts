@@ -88,6 +88,19 @@ export interface DebugInfo {
   fixturesDir: string;
 }
 
+/** One chapter of an audiobook export: display title + its sentences in
+ *  reading order (same segmentation the player uses, so cache keys match). */
+export interface ExportChapterPayload {
+  title: string;
+  texts: string[];
+}
+
+export interface ExportAudiobookResult {
+  /** Absolute path of the folder the chapter files were written into. */
+  dir: string;
+  chaptersWritten: number;
+}
+
 /* ================= commands ================= */
 
 export const ipc = {
@@ -143,6 +156,23 @@ export const ipc = {
     label: string,
   ): Promise<number> => call("tts_precache", { provider, voiceId, texts, taskId, label }),
   precacheCancel: (): Promise<void> => call("tts_precache_cancel"),
+
+  /** Export a book as per-chapter tagged MP3 files. Reuses the audio cache
+   *  (only missing sentences synthesize). Progress arrives via
+   *  download-progress events under `taskId` (units: sentences + one per
+   *  chapter stitched); shares the one-job-at-a-time guard and cancel with
+   *  precache (cancel via precacheCancel). */
+  exportAudiobook: (req: {
+    itemId: string;
+    provider: ProviderId;
+    voiceId: string;
+    bookTitle: string;
+    author: string | null;
+    chapters: ExportChapterPayload[];
+    destDir: string;
+    taskId: string;
+    label: string;
+  }): Promise<ExportAudiobookResult> => call("export_audiobook", { req }),
 
   /* ----- kokoro local voices ----- */
   kokoroStatus: (): Promise<KokoroStatus> => call("kokoro_status"),

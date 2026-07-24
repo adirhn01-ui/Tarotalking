@@ -39,53 +39,15 @@ pub async fn tts_precache(
     task_id: String,
     label: String,
 ) -> Result<u32> {
-    {
-        let mut active = state.active.lock().unwrap();
-        if active.is_some() {
-            return Err(AppError::msg("Another audio preparation is already running"));
-        }
-        *active = Some(task_id.clone());
-        state.cancel.store(false, Ordering::SeqCst);
-    }
+    let cancel_flag = claim_job(&state, &task_id, "Another audio preparation is already running")?;
 
-    // State handles can't cross into spawn_blocking; move plain handles.
-    let cancel_flag = std::sync::Arc::new(AtomicBool::new(false));
-    let cancel_in = cancel_flag.clone();
-    {
-        // Bridge: the managed flag is polled by the blocking loop through
-        // this Arc; tts_precache_cancel sets the managed flag which we
-        // mirror below on every iteration via a lightweight check command.
-        // Simpler: store the Arc in the managed state for cancel to flip.
-        *CANCEL_BRIDGE.lock().unwrap() = Some(cancel_in.clone());
-    }
-
-    // ---- Worker-pool precache ------------------------------------------------
-    // A 2000-word chapter used to take minutes because sentences synthesized
-    // strictly one at a time: every Edge sentence paid a fresh WebSocket
-    // handshake and every local engine reloaded its model per spawn. Here a pool
-    // of K workers (K = precache_workers(provider): 2 for the CPU/process-heavy
-    // local engines, 4 for the network-bound cloud ones) pulls sentence indices
-    // from a shared atomic cursor and synthesizes in parallel.
-    //
-    // synth_via_cache is thread-safe for DIFFERENT texts — each writes its own
-    // staging file, and prune never evicts files younger than 120s — so the one
-    // real hazard is two workers racing on the SAME cache key (their staging
-    // files would collide). The up-front de-duplication rules that out. The
-    // scope's main thread doubles as the throttled progress emitter, and
-    // thread::scope joins every worker before returning, so a cancel or an error
-    // winds the whole pool down cleanly before the terminal emit.
     let result = tauri::async_runtime::spawn_blocking(move || {
         // De-duplicate first: repeated sentences share a cache key, and two
         // workers on the same key would collide on its staging file. Preserve
         // first-occurrence order and drop empty/whitespace texts here so the
         // progress total reflects only the real synthesis work.
-        let mut seen: HashSet<&str> = HashSet::new();
-        let work: Vec<&str> = texts
-            .iter()
-            .map(|s| s.as_str())
-            .filter(|t| !t.trim().is_empty())
-            .filter(|t| seen.insert(*t))
-            .collect();
+        let refs: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
+        let work = dedupe_work(&refs);
         let total = work.len() as u64;
 
         let emit = |received: u64, done: bool, error: Option<String>| {
@@ -103,77 +65,17 @@ pub async fn tts_precache(
         };
         emit(0, false, None);
 
-        let completed = Arc::new(AtomicU32::new(0));
-        let cursor = Arc::new(AtomicUsize::new(0));
-        let error_flag = Arc::new(AtomicBool::new(false));
-        let first_error: Mutex<Option<AppError>> = Mutex::new(None);
+        let (synthesized, first_error) =
+            run_synth_pool(&provider, &voice_id, &work, &cancel_flag, |received| {
+                emit(received, false, None)
+            });
 
-        // Never spawn more workers than there is work.
-        let k = precache_workers(&provider).min(work.len());
-        let provider = provider.as_str();
-        let voice_id = voice_id.as_str();
-        let work = &work;
-        let first_error = &first_error;
-
-        thread::scope(|scope| {
-            for _ in 0..k {
-                let completed = Arc::clone(&completed);
-                let cursor = Arc::clone(&cursor);
-                let error_flag = Arc::clone(&error_flag);
-                let cancel_flag = Arc::clone(&cancel_flag);
-                scope.spawn(move || loop {
-                    // Wind down as soon as anyone cancels or hits an error.
-                    if cancel_flag.load(Ordering::SeqCst) || error_flag.load(Ordering::SeqCst) {
-                        break;
-                    }
-                    let idx = cursor.fetch_add(1, Ordering::SeqCst);
-                    if idx >= work.len() {
-                        break;
-                    }
-                    match cache::synth_via_cache(provider, voice_id, work[idx]) {
-                        Ok(_) => {
-                            completed.fetch_add(1, Ordering::SeqCst);
-                        }
-                        Err(e) => {
-                            // Keep the FIRST error; signal the others to stop.
-                            let mut slot = first_error.lock().unwrap();
-                            if slot.is_none() {
-                                *slot = Some(e);
-                            }
-                            error_flag.store(true, Ordering::SeqCst);
-                            break;
-                        }
-                    }
-                });
-            }
-
-            // Progress emitter (this thread): throttle to ~300ms until the pool
-            // finishes, is cancelled, or errors. The single terminal emit is
-            // sent after the scope joins, when the counts are final.
-            let mut last_emit = Instant::now();
-            loop {
-                let done_now = completed.load(Ordering::SeqCst) as u64;
-                if cancel_flag.load(Ordering::SeqCst)
-                    || error_flag.load(Ordering::SeqCst)
-                    || done_now >= total
-                {
-                    break;
-                }
-                if last_emit.elapsed() >= Duration::from_millis(300) {
-                    emit(done_now, false, None);
-                    last_emit = Instant::now();
-                }
-                thread::sleep(Duration::from_millis(50));
-            }
-        });
-
-        // Pool fully joined here — the count and the error slot are stable.
-        let synthesized = completed.load(Ordering::SeqCst);
+        // Pool fully joined — the count and the error slot are stable.
         if cancel_flag.load(Ordering::SeqCst) {
             emit(synthesized as u64, true, Some("Cancelled".into()));
             return Ok(synthesized);
         }
-        if let Some(err) = first_error.lock().unwrap().take() {
+        if let Some(err) = first_error {
             emit(synthesized as u64, true, Some(err.to_string()));
             return Err(err);
         }
@@ -184,8 +86,7 @@ pub async fn tts_precache(
     .map_err(|e| AppError::wrap("Preparation task", e))
     .and_then(|r| r);
 
-    *state.active.lock().unwrap() = None;
-    *CANCEL_BRIDGE.lock().unwrap() = None;
+    release_job(&state);
     result
 }
 
@@ -210,6 +111,132 @@ fn precache_workers(provider: &str) -> usize {
         "system" | "piper" | "kokoro" => 2,
         _ => 4,
     }
+}
+
+/// Claim the single audio-job slot shared by precache and export. Wires a fresh
+/// cancel flag into `CANCEL_BRIDGE` so `tts_precache_cancel` reaches whichever
+/// job currently holds the slot. Errors with `busy_msg` when a job is running.
+pub(crate) fn claim_job(
+    state: &PrecacheState,
+    task_id: &str,
+    busy_msg: &str,
+) -> Result<Arc<AtomicBool>> {
+    {
+        let mut active = state.active.lock().unwrap();
+        if active.is_some() {
+            return Err(AppError::msg(busy_msg));
+        }
+        *active = Some(task_id.to_string());
+        state.cancel.store(false, Ordering::SeqCst);
+    }
+    // State handles can't cross into spawn_blocking; the blocking loop polls
+    // this Arc, and tts_precache_cancel flips it through the bridge.
+    let cancel_flag = Arc::new(AtomicBool::new(false));
+    *CANCEL_BRIDGE.lock().unwrap() = Some(cancel_flag.clone());
+    Ok(cancel_flag)
+}
+
+/// Release the audio-job slot and drop the cancel bridge.
+pub(crate) fn release_job(state: &PrecacheState) {
+    *state.active.lock().unwrap() = None;
+    *CANCEL_BRIDGE.lock().unwrap() = None;
+}
+
+/// De-duplicate a sentence list, preserving first-occurrence order and dropping
+/// empty/whitespace-only entries. Repeated sentences share one cache key, so a
+/// single synthesis serves them all.
+pub(crate) fn dedupe_work<'a>(texts: &[&'a str]) -> Vec<&'a str> {
+    let mut seen: HashSet<&'a str> = HashSet::new();
+    texts
+        .iter()
+        .copied()
+        .filter(|t| !t.trim().is_empty())
+        .filter(|t| seen.insert(*t))
+        .collect()
+}
+
+/// Synthesize `work` (already de-duplicated and non-empty) into the disk cache
+/// with a provider-sized worker pool: K workers (`precache_workers`) pull
+/// sentence indices from a shared atomic cursor and synthesize in parallel.
+///
+/// `synth_via_cache` is thread-safe for DIFFERENT texts — each writes its own
+/// staging file, and prune never evicts files younger than 120s — so the one
+/// real hazard is two workers racing on the SAME cache key. The caller's up-front
+/// de-duplication rules that out. The pool winds down cleanly on cancel or the
+/// first error; `on_progress(completed)` runs on this thread at ~300ms intervals
+/// while it works. Returns the completed count and the first error, if any — the
+/// caller inspects `cancel` to tell a cancel apart from a clean finish.
+pub(crate) fn run_synth_pool(
+    provider: &str,
+    voice_id: &str,
+    work: &[&str],
+    cancel: &Arc<AtomicBool>,
+    on_progress: impl Fn(u64),
+) -> (u32, Option<AppError>) {
+    let total = work.len() as u64;
+    let completed = Arc::new(AtomicU32::new(0));
+    let cursor = Arc::new(AtomicUsize::new(0));
+    let error_flag = Arc::new(AtomicBool::new(false));
+    let first_error: Mutex<Option<AppError>> = Mutex::new(None);
+
+    // Never spawn more workers than there is work.
+    let k = precache_workers(provider).min(work.len());
+    let first_error = &first_error;
+
+    thread::scope(|scope| {
+        for _ in 0..k {
+            let completed = Arc::clone(&completed);
+            let cursor = Arc::clone(&cursor);
+            let error_flag = Arc::clone(&error_flag);
+            let cancel = Arc::clone(cancel);
+            scope.spawn(move || loop {
+                // Wind down as soon as anyone cancels or hits an error.
+                if cancel.load(Ordering::SeqCst) || error_flag.load(Ordering::SeqCst) {
+                    break;
+                }
+                let idx = cursor.fetch_add(1, Ordering::SeqCst);
+                if idx >= work.len() {
+                    break;
+                }
+                match cache::synth_via_cache(provider, voice_id, work[idx]) {
+                    Ok(_) => {
+                        completed.fetch_add(1, Ordering::SeqCst);
+                    }
+                    Err(e) => {
+                        // Keep the FIRST error; signal the others to stop.
+                        let mut slot = first_error.lock().unwrap();
+                        if slot.is_none() {
+                            *slot = Some(e);
+                        }
+                        error_flag.store(true, Ordering::SeqCst);
+                        break;
+                    }
+                }
+            });
+        }
+
+        // Progress emitter (this thread): throttle to ~300ms until the pool
+        // finishes, is cancelled, or errors.
+        let mut last_emit = Instant::now();
+        loop {
+            let done_now = completed.load(Ordering::SeqCst) as u64;
+            if cancel.load(Ordering::SeqCst)
+                || error_flag.load(Ordering::SeqCst)
+                || done_now >= total
+            {
+                break;
+            }
+            if last_emit.elapsed() >= Duration::from_millis(300) {
+                on_progress(done_now);
+                last_emit = Instant::now();
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+    });
+
+    let synthesized = completed.load(Ordering::SeqCst);
+    let err = first_error.lock().unwrap().take();
+    (synthesized, err)
 }
 
 use crate::error::{AppError, Result};

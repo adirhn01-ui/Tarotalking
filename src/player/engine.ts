@@ -9,7 +9,7 @@
 //   engine.startSleepTimer/cancelSleepTimer, engine.seekToPct
 
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { getItem, setPlaybackPosition, updateItem } from "../core/library";
+import { getItem, updateItem } from "../core/library";
 import { describeError, inTauri, ipc } from "../core/ipc";
 import { splitSentences, type SentenceSpan } from "../core/segment";
 import { settingsStore, updatePlaybackPrefs } from "../core/session";
@@ -232,8 +232,12 @@ function persistPosition(): void {
   const label = doc?.chapters[p.chapter]?.title;
   window.clearTimeout(persistTimer);
   persistTimer = window.setTimeout(() => {
-    setPlaybackPosition(id, p, label);
-    updateItem(id, { progressPct: pct });
+    // One patch → one index clone → one store notification for the pair.
+    updateItem(id, {
+      playback: p,
+      progressPct: pct,
+      ...(label !== undefined ? { chapterLabel: label } : {}),
+    });
   }, 500);
 }
 

@@ -3,6 +3,7 @@
 
 mod downloads;
 mod error;
+mod export;
 mod import;
 mod keys;
 mod library;
@@ -224,6 +225,7 @@ pub fn run() {
             tts::tts_synth,
             tts::tts_precache,
             tts::tts_precache_cancel,
+            export::export_audiobook,
             tts::kokoro::kokoro_status,
             tts::kokoro::kokoro_install_engine,
             tts::kokoro::kokoro_install_model,
