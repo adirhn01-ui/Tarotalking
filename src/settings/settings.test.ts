@@ -4,10 +4,15 @@
 import { describe, expect, it } from "vitest";
 import {
   actionChordDisplay,
-  CACHE_LIMIT_OPTIONS,
+  CACHE_CUSTOM_MAX,
+  CACHE_CUSTOM_MIN,
+  CACHE_LIMIT_PRESETS,
   cacheLimitLabel,
+  cacheLimitSelectValue,
   cacheUsageLabel,
   chordKeys,
+  clampCustomCacheLimit,
+  isCustomCacheLimit,
   shortcutConflictSet,
 } from "./settings";
 import {
@@ -16,6 +21,9 @@ import {
   formatMB,
   isHighQuality,
   isKeyProvider,
+  KOKORO_ENGINE_TASK,
+  KOKORO_MODEL_TASK,
+  kokoroTaskBase,
   localeShortBadge,
   piperModelTask,
   piperTaskBase,
@@ -28,13 +36,49 @@ import {
 
 describe("cacheLimitLabel", () => {
   it("uses MB below 1 GB and GB at/above", () => {
-    expect(cacheLimitLabel(100)).toBe("100 MB");
+    expect(cacheLimitLabel(200)).toBe("200 MB");
     expect(cacheLimitLabel(500)).toBe("500 MB");
     expect(cacheLimitLabel(1000)).toBe("1 GB");
     expect(cacheLimitLabel(2000)).toBe("2 GB");
+    expect(cacheLimitLabel(5000)).toBe("5 GB");
   });
-  it("offers the documented set of limits", () => {
-    expect([...CACHE_LIMIT_OPTIONS]).toEqual([100, 200, 500, 1000, 2000]);
+  it("labels a zero/negative cap as Unlimited", () => {
+    expect(cacheLimitLabel(0)).toBe("Unlimited");
+    expect(cacheLimitLabel(-5)).toBe("Unlimited");
+  });
+  it("offers the documented preset sizes", () => {
+    expect([...CACHE_LIMIT_PRESETS]).toEqual([200, 500, 1000, 2000, 5000]);
+  });
+});
+
+describe("cache-limit select mapping", () => {
+  it("maps 0 to Unlimited (not custom)", () => {
+    expect(cacheLimitSelectValue(0)).toBe("unlimited");
+    expect(isCustomCacheLimit(0)).toBe(false);
+  });
+  it("maps a preset to its numeric value", () => {
+    expect(cacheLimitSelectValue(200)).toBe("200");
+    expect(cacheLimitSelectValue(5000)).toBe("5000");
+    expect(isCustomCacheLimit(500)).toBe(false);
+  });
+  it("maps any non-preset, non-zero size to Custom", () => {
+    expect(cacheLimitSelectValue(750)).toBe("custom");
+    expect(cacheLimitSelectValue(50)).toBe("custom");
+    expect(isCustomCacheLimit(750)).toBe(true);
+    expect(isCustomCacheLimit(50)).toBe(true);
+  });
+});
+
+describe("clampCustomCacheLimit", () => {
+  it("clamps into the allowed MB range and rounds", () => {
+    expect(clampCustomCacheLimit(750)).toBe(750);
+    expect(clampCustomCacheLimit(10)).toBe(CACHE_CUSTOM_MIN);
+    expect(clampCustomCacheLimit(999_999)).toBe(CACHE_CUSTOM_MAX);
+    expect(clampCustomCacheLimit(123.6)).toBe(124);
+  });
+  it("falls back to the minimum for non-finite input", () => {
+    expect(clampCustomCacheLimit(NaN)).toBe(CACHE_CUSTOM_MIN);
+    expect(clampCustomCacheLimit(Infinity)).toBe(CACHE_CUSTOM_MIN);
   });
 });
 
@@ -96,6 +140,20 @@ describe("piper task routing", () => {
     expect(piperTaskBase("piper-model-en_US-amy-medium")).toBe("piper-model-en_US-amy-medium");
     expect(piperTaskBase("piper-model-en_US-amy-medium-cfg")).toBe("piper-model-en_US-amy-medium");
     expect(piperTaskBase("something-else")).toBeNull();
+  });
+});
+
+describe("kokoro task routing", () => {
+  it("resolves the engine and model task ids (and their -cfg companions)", () => {
+    expect(kokoroTaskBase(KOKORO_ENGINE_TASK)).toBe("kokoro-engine");
+    expect(kokoroTaskBase(KOKORO_MODEL_TASK)).toBe("kokoro-model");
+    expect(kokoroTaskBase("kokoro-engine-cfg")).toBe("kokoro-engine");
+    expect(kokoroTaskBase("kokoro-model-cfg")).toBe("kokoro-model");
+  });
+  it("ignores non-kokoro task ids", () => {
+    expect(kokoroTaskBase(PIPER_BINARY_TASK)).toBeNull();
+    expect(kokoroTaskBase("piper-model-amy")).toBeNull();
+    expect(kokoroTaskBase("something-else")).toBeNull();
   });
 });
 
@@ -163,6 +221,7 @@ describe("previewCostsCredits", () => {
     expect(previewCostsCredits("edge")).toBe(false);
     expect(previewCostsCredits("system")).toBe(false);
     expect(previewCostsCredits("piper")).toBe(false);
+    expect(previewCostsCredits("kokoro")).toBe(false);
   });
 });
 
@@ -178,6 +237,7 @@ describe("isKeyProvider", () => {
     expect(isKeyProvider("edge")).toBe(false);
     expect(isKeyProvider("system")).toBe(false);
     expect(isKeyProvider("piper")).toBe(false);
+    expect(isKeyProvider("kokoro")).toBe(false);
   });
 });
 

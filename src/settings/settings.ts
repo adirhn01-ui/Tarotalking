@@ -43,12 +43,36 @@ export interface SettingsView {
 
 /* ================= pure helpers (unit-tested) ================= */
 
-/** Cache-limit choices, in megabytes. */
-export const CACHE_LIMIT_OPTIONS = [100, 200, 500, 1000, 2000] as const;
+/** Preset cache-limit sizes offered in the Storage select, in megabytes.
+ *  ("Unlimited" (0) and "Custom" are added as non-numeric choices in the UI.) */
+export const CACHE_LIMIT_PRESETS = [200, 500, 1000, 2000, 5000] as const;
 
-/** "100 MB", "1 GB", "2 GB" — GB above 1000 MB. */
+/** Bounds for the Custom cache-limit input (megabytes). */
+export const CACHE_CUSTOM_MIN = 50;
+export const CACHE_CUSTOM_MAX = 100_000;
+
+/** "200 MB", "1 GB", "5 GB" — GB at/above 1000 MB; 0 (or less) → "Unlimited". */
 export function cacheLimitLabel(mb: number): string {
+  if (mb <= 0) return "Unlimited";
   return mb >= 1000 ? `${mb / 1000} GB` : `${mb} MB`;
+}
+
+/** The <select> option value matching a stored cacheLimitMB: "unlimited" for 0,
+ *  the preset number as a string when it matches one, otherwise "custom". */
+export function cacheLimitSelectValue(mb: number): string {
+  if (mb <= 0) return "unlimited";
+  return (CACHE_LIMIT_PRESETS as readonly number[]).includes(mb) ? String(mb) : "custom";
+}
+
+/** True when a stored cacheLimitMB needs the Custom input (non-zero, non-preset). */
+export function isCustomCacheLimit(mb: number): boolean {
+  return cacheLimitSelectValue(mb) === "custom";
+}
+
+/** Clamp a typed custom cache limit into the allowed MB range (NaN → min). */
+export function clampCustomCacheLimit(mb: number): number {
+  if (!Number.isFinite(mb)) return CACHE_CUSTOM_MIN;
+  return Math.max(CACHE_CUSTOM_MIN, Math.min(CACHE_CUSTOM_MAX, Math.round(mb)));
 }
 
 /** "184 MB · 213 clips" from a CacheStats. */
@@ -390,6 +414,8 @@ export function mountSettings(el: HTMLElement, section?: string): SettingsView {
   // Async, section-scoped state.
   let cacheStats: CacheStats | null = null;
   let cacheStatsError = false;
+  // Storage: whether the Custom cache-limit input is revealed.
+  let customCacheOpen = false;
   // API keys, per provider: presence (null = still checking) and whether the
   // row is in "replace" (input) mode.
   const hasKey: Record<KeyProviderId, boolean | null> = {
@@ -499,6 +525,11 @@ export function mountSettings(el: HTMLElement, section?: string): SettingsView {
       ) +
       rowHtml("Auto-scroll while listening", switchHtml("p-auto", pb.autoScroll));
     const appBehavior =
+      rowHtml(
+        "Mini player",
+        switchHtml("p-mini", s.miniPlayer),
+        "Keep playing when you leave a book, with a compact player on the home screen. Off: leaving a book pauses it.",
+      ) +
       rowHtml("Resume last item on launch", switchHtml("p-resume", s.resumeLastItem)) +
       rowHtml(
         "Keep playing when window closes",
@@ -585,17 +616,32 @@ export function mountSettings(el: HTMLElement, section?: string): SettingsView {
     if (cacheStatsError) usage = `<span class="faint">Couldn't read cache usage.</span>`;
     else if (cacheStats === null) usage = `<span class="faint">Reading usage…</span>`;
     else usage = `<span class="set-usage">${escapeHtml(cacheUsageLabel(cacheStats))}</span>`;
+    const limitOptions = [
+      ...CACHE_LIMIT_PRESETS.map((mb) => ({ value: String(mb), label: cacheLimitLabel(mb) })),
+      { value: "unlimited", label: "Unlimited" },
+      { value: "custom", label: "Custom" },
+    ];
+    const selValue = customCacheOpen ? "custom" : cacheLimitSelectValue(s.cacheLimitMB);
+    const limitRow = rowHtml(
+      "Cache limit",
+      selectHtml("s-limit", selValue, limitOptions),
+      "Unlimited keeps every synthesized clip; a size cap prunes the oldest audio automatically.",
+    );
+    const prefill = s.cacheLimitMB >= CACHE_CUSTOM_MIN ? s.cacheLimitMB : 1000;
+    const customRow = customCacheOpen
+      ? rowHtml(
+          "Custom limit",
+          `<input type="number" class="input set-cache-input" id="s-custom" min="${CACHE_CUSTOM_MIN}" max="${CACHE_CUSTOM_MAX}" step="10" value="${prefill}" />
+            <span class="set-cache-unit">MB</span>
+            <button type="button" class="btn btn--sm btn--primary" id="s-custom-apply">Apply</button>`,
+          `Between ${CACHE_CUSTOM_MIN} MB and ${CACHE_CUSTOM_MAX.toLocaleString("en-US")} MB.`,
+        )
+      : "";
     const cacheGroup = groupHtml(
       "Audio cache",
       rowHtml("Used", usage) +
-        rowHtml(
-          "Cache limit",
-          selectHtml(
-            "s-limit",
-            String(s.cacheLimitMB),
-            CACHE_LIMIT_OPTIONS.map((mb) => ({ value: String(mb), label: cacheLimitLabel(mb) })),
-          ),
-        ) +
+        limitRow +
+        customRow +
         rowHtml(
           "Clear cache",
           `<button type="button" class="btn btn--sm" id="s-clear">Clear cache</button>`,
@@ -619,7 +665,7 @@ export function mountSettings(el: HTMLElement, section?: string): SettingsView {
       groupHtml(
         "Tarotalking",
         `<div class="set-about">
-          <div class="set-about__name">Tarotalking <span class="set-about__ver">0.1.0</span></div>
+          <div class="set-about__name">Tarotalking <span class="set-about__ver">0.5.0</span></div>
           <div class="set-about__desc">A fast, private text-to-speech reader for your books, articles, and notes.</div>
           <div class="set-about__tag faint">Built as a fast, private, offline-friendly reader.</div>
           <div class="set-about__license faint">Licensed under GPL-3.0.</div>
@@ -713,6 +759,9 @@ export function mountSettings(el: HTMLElement, section?: string): SettingsView {
     });
     inner.querySelector<HTMLInputElement>("#p-auto")?.addEventListener("change", (e) => {
       updatePlaybackPrefs({ autoScroll: (e.target as HTMLInputElement).checked });
+    });
+    inner.querySelector<HTMLInputElement>("#p-mini")?.addEventListener("change", (e) => {
+      updateSettings({ miniPlayer: (e.target as HTMLInputElement).checked });
     });
     inner.querySelector<HTMLInputElement>("#p-resume")?.addEventListener("change", (e) => {
       updateSettings({ resumeLastItem: (e.target as HTMLInputElement).checked });
@@ -853,11 +902,36 @@ export function mountSettings(el: HTMLElement, section?: string): SettingsView {
     if (active === "storage") renderSimple("storage");
   }
 
+  /** Persist a cache limit (0 = unlimited) and enforce it in the backend. */
+  function applyCacheLimit(mb: number): void {
+    updateSettings({ cacheLimitMB: mb });
+    void ipc.cachePrune(mb === 0 ? 0 : mb * 1e6).catch(() => {});
+  }
+
   function wireStorage(): void {
     inner.querySelector<HTMLSelectElement>("#s-limit")?.addEventListener("change", (e) => {
-      const mb = Number((e.target as HTMLSelectElement).value);
-      updateSettings({ cacheLimitMB: mb });
-      void ipc.cachePrune(mb * 1e6).catch(() => {});
+      const v = (e.target as HTMLSelectElement).value;
+      if (v === "custom") {
+        // Reveal the number input; nothing is committed until Apply.
+        customCacheOpen = true;
+        renderSimple("storage");
+        return;
+      }
+      customCacheOpen = false;
+      applyCacheLimit(v === "unlimited" ? 0 : Number(v));
+    });
+    const customInput = inner.querySelector<HTMLInputElement>("#s-custom");
+    const applyCustom = (): void => {
+      if (!customInput) return;
+      customCacheOpen = true;
+      applyCacheLimit(clampCustomCacheLimit(Number(customInput.value)));
+    };
+    inner.querySelector<HTMLButtonElement>("#s-custom-apply")?.addEventListener("click", applyCustom);
+    customInput?.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        applyCustom();
+      }
     });
     inner.querySelector<HTMLButtonElement>("#s-clear")?.addEventListener("click", () => {
       confirmModal({
@@ -901,6 +975,7 @@ export function mountSettings(el: HTMLElement, section?: string): SettingsView {
       updateSettings({
         playback: { ...DEFAULT_PLAYBACK_PREFS },
         audioQuality: DEFAULT_SETTINGS.audioQuality,
+        miniPlayer: DEFAULT_SETTINGS.miniPlayer,
         closeToTray: DEFAULT_SETTINGS.closeToTray,
         resumeLastItem: DEFAULT_SETTINGS.resumeLastItem,
         notifications: DEFAULT_SETTINGS.notifications,
@@ -913,6 +988,7 @@ export function mountSettings(el: HTMLElement, section?: string): SettingsView {
       updateSettings({ shortcuts: { ...DEFAULT_SHORTCUTS } });
     } else if (id === "storage") {
       // Reset the cap only — synthesized audio is left untouched.
+      customCacheOpen = false;
       updateSettings({ cacheLimitMB: DEFAULT_SETTINGS.cacheLimitMB });
     }
   }
@@ -993,10 +1069,14 @@ export function mountSettings(el: HTMLElement, section?: string): SettingsView {
       return;
     }
 
-    renderSimple(id);
     if (id === "storage") {
       cacheStats = null;
       cacheStatsError = false;
+      // Open Custom mode up-front when the stored value isn't a preset/unlimited.
+      customCacheOpen = isCustomCacheLimit(settingsStore.get().cacheLimitMB);
+    }
+    renderSimple(id);
+    if (id === "storage") {
       void loadCacheStats();
     } else if (id === "keys") {
       for (const kp of KEY_PROVIDERS) hasKey[kp.id] = null;

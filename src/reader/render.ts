@@ -7,8 +7,18 @@
 // vitest environment) is safe; the DOM functions are only ever called in the
 // WebView.
 
+import { formatBytes } from "../core/format";
 import { countWords, splitSentences, type SentenceSpan } from "../core/segment";
-import type { BlockType, ContentDoc, HighlightMode, Position } from "../core/types";
+import { audioBytesPerSecond, SPEAKING_WPM } from "../core/types";
+import type {
+  Annotation,
+  AudioQuality,
+  BlockType,
+  ContentDoc,
+  HighlightMode,
+  Position,
+  ProviderId,
+} from "../core/types";
 
 /* ============================================================
    PURE helpers (no DOM) — unit tested
@@ -189,6 +199,78 @@ export function filterByLabel<T>(
   return { indices, overflow: matched - indices.length, filtered: true };
 }
 
+/* ---- highlights / annotations (pure) ---- */
+
+/** One highlight's char sub-range within a single block. */
+export interface AnnRange<A> {
+  ann: A;
+  startChar: number;
+  endChar: number;
+}
+
+/** A contiguous run of block text, tagged with the annotation that owns it
+ *  (absent for un-highlighted text). */
+export interface AnnSegment<A> {
+  text: string;
+  ann?: A;
+}
+
+/** Slice a block's plain text into segments by the given highlight ranges.
+ *  Overlaps resolve last-wins (a later range in the list wins the chars it
+ *  shares with an earlier one). The concatenated segment text always equals the
+ *  input, so downstream sentence-offset math is unaffected. Pure. */
+export function annotationSegments<A>(blockText: string, ranges: AnnRange<A>[]): AnnSegment<A>[] {
+  const len = blockText.length;
+  if (len === 0) return [];
+  const owner = new Array<number>(len).fill(-1);
+  ranges.forEach((r, ri) => {
+    const start = Math.max(0, Math.min(r.startChar, len));
+    const end = Math.max(start, Math.min(r.endChar, len));
+    for (let i = start; i < end; i++) owner[i] = ri;
+  });
+  const out: AnnSegment<A>[] = [];
+  let i = 0;
+  while (i < len) {
+    const o = owner[i]!;
+    let j = i + 1;
+    while (j < len && owner[j] === o) j++;
+    const seg: AnnSegment<A> = { text: blockText.slice(i, j) };
+    if (o >= 0) seg.ann = ranges[o]!.ann;
+    out.push(seg);
+    i = j;
+  }
+  return out;
+}
+
+/** Char sub-range [startChar, endChar) an annotation covers inside one block of
+ *  its chapter, or null when the block is outside the annotation's block span or
+ *  the covered range is empty. Endpoints clamp to the block text length so a
+ *  stale offset can never overrun. Pure. */
+export function blockAnnotationRange(
+  ann: { startBlock: number; startChar: number; endBlock: number; endChar: number },
+  block: number,
+  textLen: number,
+): { startChar: number; endChar: number } | null {
+  if (block < ann.startBlock || block > ann.endBlock) return null;
+  const rawStart = block === ann.startBlock ? ann.startChar : 0;
+  const rawEnd = block === ann.endBlock ? ann.endChar : textLen;
+  const startChar = Math.max(0, Math.min(rawStart, textLen));
+  const endChar = Math.max(startChar, Math.min(rawEnd, textLen));
+  return endChar > startChar ? { startChar, endChar } : null;
+}
+
+/** Estimated synthesized-audio size (bytes) to pre-render `words` of speech with
+ *  a provider at a quality. Powers the per-chapter "Prepare audio (~SIZE)" hint. */
+export function prepareAudioBytes(words: number, provider: ProviderId, quality: AudioQuality): number {
+  if (!Number.isFinite(words) || words <= 0) return 0;
+  return (words / SPEAKING_WPM) * 60 * audioBytesPerSecond(provider, quality);
+}
+
+/** Human-readable form of prepareAudioBytes (e.g. "1.4 MB"). Pure. */
+export function prepareAudioSizeLabel(words: number, provider: ProviderId, quality: AudioQuality): string {
+  return formatBytes(prepareAudioBytes(words, provider, quality));
+}
+
 /** The HTML tag a text block renders into. */
 export function blockTag(t: BlockType): string {
   switch (t) {
@@ -307,6 +389,33 @@ export function clearSentenceSpans(el: HTMLElement, text: string): void {
   delete el.dataset.spanned;
 }
 
+/** Rebuild a block element's content with `<mark>` highlights over the given
+ *  ranges (dropping any prior marks or plain text). Marks wrap the SAME
+ *  characters the block already held, so textContent length is unchanged and the
+ *  engine's sentence offsets keep lining up. Never called on a block that is
+ *  currently sentence-spanned (the speaking block shows spans, not marks). */
+export function applyAnnotations(
+  blockEl: HTMLElement,
+  blockText: string,
+  anns: AnnRange<Annotation>[],
+): void {
+  const frag = document.createDocumentFragment();
+  for (const seg of annotationSegments(blockText, anns)) {
+    if (seg.ann) {
+      const mark = document.createElement("mark");
+      mark.className = `hl hl--${seg.ann.color}`;
+      mark.dataset.ann = seg.ann.id;
+      mark.textContent = seg.text;
+      frag.appendChild(mark);
+    } else {
+      frag.appendChild(document.createTextNode(seg.text));
+    }
+  }
+  blockEl.textContent = "";
+  blockEl.appendChild(frag);
+  delete blockEl.dataset.spanned;
+}
+
 /** Wrap the active word inside a sentence span (rebuilds only that span). */
 export function setSentenceWord(sentEl: HTMLElement, charStart: number, charLen: number): void {
   const text = sentEl.textContent ?? "";
@@ -343,13 +452,20 @@ export interface Highlighter {
   clearWord(): void;
 }
 
-export function createHighlighter(): Highlighter {
+export function createHighlighter(
+  onRestoreBlock?: (blockEl: HTMLElement, text: string) => void,
+): Highlighter {
   let curBlockEl: HTMLElement | null = null;
   let curText = "";
   let curSentEl: HTMLElement | null = null;
 
   function dropBlock(): void {
-    if (curBlockEl && curBlockEl.isConnected) clearSentenceSpans(curBlockEl, curText);
+    if (curBlockEl && curBlockEl.isConnected) {
+      // Restore plain text, then let the reader re-paint this block's highlight
+      // marks (they were replaced by sentence spans while it was speaking).
+      clearSentenceSpans(curBlockEl, curText);
+      onRestoreBlock?.(curBlockEl, curText);
+    }
     curBlockEl = null;
     curText = "";
     curSentEl = null;

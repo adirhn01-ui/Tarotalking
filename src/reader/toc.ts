@@ -1,13 +1,18 @@
-// Reader side panel: Contents + Bookmarks tabs. Owns no reading surface — it
-// asks the reader to jump via callbacks and reads live library state for
-// bookmarks. Mounted into the reader's TOC host.
+// Reader side panel: Contents + Bookmarks + Highlights tabs. Owns no reading
+// surface — it asks the reader to jump via callbacks and reads live library
+// state for bookmarks/highlights. The Contents tab also drives per-chapter
+// audio pre-synthesis (through ipc.precache). Mounted into the reader's TOC host.
 
+import { describeError, ipc, onDownloadProgress } from "../core/ipc";
 import { formatRelative, formatTimeLeft, readingMinutes } from "../core/format";
-import { getItem, libraryStore, removeBookmark } from "../core/library";
+import { getItem, libraryStore, removeAnnotation, removeBookmark } from "../core/library";
+import { splitSentences } from "../core/segment";
+import { settingsStore } from "../core/session";
 import { subscribeSelect } from "../core/store";
-import type { Chapter, ContentDoc, LibraryItem, Position } from "../core/types";
+import type { Chapter, ContentDoc, LibraryItem, Position, VoiceRef } from "../core/types";
 import { icon } from "../ui/icons";
-import { filterByLabel } from "./render";
+import { toast } from "../ui/toast";
+import { filterByLabel, prepareAudioSizeLabel } from "./render";
 
 export interface TocOptions {
   doc: ContentDoc;
@@ -19,6 +24,8 @@ export interface TocOptions {
   onJumpChapter(pos: Position): void;
   /** Jump to a bookmark (reader flashes the block). */
   onJumpBookmark(pos: Position): void;
+  /** Jump to a highlight's start block (reader flashes the block). */
+  onJumpHighlight(pos: Position): void;
 }
 
 export interface TocController {
@@ -27,7 +34,13 @@ export interface TocController {
   refresh(): void;
 }
 
-type Tab = "contents" | "bookmarks";
+type Tab = "contents" | "bookmarks" | "highlights";
+
+const SEARCH_PLACEHOLDER: Record<Tab, string> = {
+  contents: "Search chapters",
+  bookmarks: "Search bookmarks",
+  highlights: "Search highlights",
+};
 
 export function mountToc(host: HTMLElement, opts: TocOptions): TocController {
   let tab: Tab = "contents";
@@ -39,6 +52,7 @@ export function mountToc(host: HTMLElement, opts: TocOptions): TocController {
     <div class="toc__tabs">
       <button class="btn btn--sm toc__tab" data-tab="contents">Contents</button>
       <button class="btn btn--sm toc__tab" data-tab="bookmarks">Bookmarks</button>
+      <button class="btn btn--sm toc__tab" data-tab="highlights">Highlights</button>
     </div>
     <div class="toc__search">
       <span class="toc__search-icon" aria-hidden="true">${icon.search}</span>
@@ -98,14 +112,142 @@ export function mountToc(host: HTMLElement, opts: TocOptions): TocController {
 
   function renderTabs(): void {
     tabButtons.forEach((btn) => btn.classList.toggle("btn--on", btn.dataset.tab === tab));
-    search.placeholder = tab === "contents" ? "Search chapters" : "Search bookmarks";
+    search.placeholder = SEARCH_PLACEHOLDER[tab];
   }
 
   function renderList(): void {
     list.textContent = "";
     if (tab === "contents") renderContents();
-    else renderBookmarks();
+    else if (tab === "bookmarks") renderBookmarks();
+    else renderHighlights();
   }
+
+  /* ---------------- per-chapter prepare-audio ---------------- */
+
+  const preparedChapters = new Set<number>(); // completed this session
+  let runningChapter: number | null = null;
+  let runningPct = 0;
+
+  const taskPrefix = `precache-ch-${opts.itemId}-`;
+
+  function effectiveVoice(): VoiceRef | null {
+    return getItem(opts.itemId)?.voice ?? settingsStore.get().playback.voice;
+  }
+
+  function prepareSizeLabel(ci: number): string {
+    const voice = effectiveVoice();
+    // No voice yet → estimate against the default free provider; the click still
+    // asks the user to pick one before actually pre-synthesizing.
+    const provider = voice?.provider ?? "edge";
+    return prepareAudioSizeLabel(
+      opts.chapterWordCounts[ci] ?? 0,
+      provider,
+      settingsStore.get().audioQuality,
+    );
+  }
+
+  /** The chapter's speakable sentences, in order (mirrors the engine's rule). */
+  function chapterSentences(ci: number): string[] {
+    const ch = opts.doc.chapters[ci];
+    if (!ch) return [];
+    const out: string[] = [];
+    for (const b of ch.blocks) {
+      if (b.t === "img" || b.t === "hr") continue;
+      if (typeof b.text !== "string" || b.text.trim().length === 0) continue;
+      for (const s of splitSentences(b.text)) out.push(s.text);
+    }
+    return out;
+  }
+
+  function renderPrepareButton(btn: HTMLButtonElement, ci: number): void {
+    btn.classList.remove("toc__prep--running", "toc__prep--done");
+    if (runningChapter === ci) {
+      btn.classList.add("toc__prep--running");
+      btn.textContent = `${Math.round(runningPct * 100)}%`;
+      btn.title = "Preparing audio — click to cancel";
+    } else if (preparedChapters.has(ci)) {
+      btn.classList.add("toc__prep--done");
+      btn.innerHTML = icon.check;
+      btn.title = "Audio prepared";
+    } else {
+      btn.innerHTML = icon.download;
+      btn.title = `Prepare audio (~${prepareSizeLabel(ci)})`;
+    }
+  }
+
+  function updatePrepareButton(ci: number): void {
+    const btn = list.querySelector<HTMLButtonElement>(`[data-prep="${ci}"]`);
+    if (btn) renderPrepareButton(btn, ci);
+  }
+
+  async function startPrepare(ci: number): Promise<void> {
+    const voice = effectiveVoice();
+    if (!voice) {
+      toast.error("Pick a voice first");
+      return;
+    }
+    const texts = chapterSentences(ci);
+    if (texts.length === 0) {
+      toast.info("Nothing to prepare in this chapter");
+      return;
+    }
+    runningChapter = ci;
+    runningPct = 0;
+    updatePrepareButton(ci);
+    try {
+      await ipc.precache(
+        voice.provider,
+        voice.id,
+        texts,
+        `${taskPrefix}${ci}`,
+        chapterLabel(opts.doc.chapters[ci]!, ci),
+      );
+      // Completion (and the switch to the "done" glyph) is driven by the
+      // progress "done" event below, which also carries any error.
+    } catch (e) {
+      // Backend rejects (e.g. a job is already running) surface here.
+      if (runningChapter === ci) {
+        runningChapter = null;
+        updatePrepareButton(ci);
+      }
+      const msg = describeError(e);
+      if (msg !== "Cancelled") toast.error(msg);
+    }
+  }
+
+  function onPrepareClick(ci: number): void {
+    if (runningChapter === ci) {
+      void ipc.precacheCancel().catch(() => {});
+      return;
+    }
+    if (preparedChapters.has(ci)) return; // already prepared this session
+    void startPrepare(ci);
+  }
+
+  let unlistenProgress: (() => void) | null = null;
+  void onDownloadProgress((p) => {
+    if (!p.taskId.startsWith(taskPrefix)) return;
+    const ci = Number(p.taskId.slice(taskPrefix.length));
+    if (!Number.isInteger(ci)) return;
+    if (p.done) {
+      if (runningChapter === ci) runningChapter = null;
+      if (p.error) {
+        if (p.error !== "Cancelled") toast.error(p.error);
+      } else {
+        preparedChapters.add(ci);
+      }
+      updatePrepareButton(ci);
+      return;
+    }
+    if (runningChapter === ci) {
+      runningPct = p.total && p.total > 0 ? p.received / p.total : 0;
+      updatePrepareButton(ci);
+    }
+  }).then((u) => {
+    unlistenProgress = u;
+  });
+
+  /* ---------------- lists ---------------- */
 
   function renderContents(): void {
     const current = opts.currentChapter();
@@ -117,10 +259,13 @@ export function mountToc(host: HTMLElement, opts: TocOptions): TocController {
     }
     for (const i of indices) {
       const ch = chapters[i]!;
-      const row = document.createElement("button");
+      const row = document.createElement("div");
       row.className = "toc__row toc__chapter";
       row.classList.toggle("toc__row--current", i === current);
-      row.type = "button";
+
+      const main = document.createElement("button");
+      main.className = "toc__chapter-main";
+      main.type = "button";
 
       const title = document.createElement("span");
       title.className = "toc__row-title";
@@ -131,8 +276,20 @@ export function mountToc(host: HTMLElement, opts: TocOptions): TocController {
       const words = opts.chapterWordCounts[i] ?? 0;
       mins.textContent = words > 0 ? formatTimeLeft(readingMinutes(words)) : "";
 
-      row.append(title, mins);
-      row.addEventListener("click", () => opts.onJumpChapter({ chapter: i, block: 0, sentence: 0 }));
+      main.append(title, mins);
+      main.addEventListener("click", () => opts.onJumpChapter({ chapter: i, block: 0, sentence: 0 }));
+
+      const prep = document.createElement("button");
+      prep.className = "btn btn--ghost btn--icon btn--sm toc__prep";
+      prep.type = "button";
+      prep.dataset.prep = String(i);
+      renderPrepareButton(prep, i);
+      prep.addEventListener("click", (e) => {
+        e.stopPropagation();
+        onPrepareClick(i);
+      });
+
+      row.append(main, prep);
       list.appendChild(row);
     }
     if (overflow > 0) appendNote(`…and ${overflow} more — keep typing`);
@@ -191,12 +348,88 @@ export function mountToc(host: HTMLElement, opts: TocOptions): TocController {
     if (overflow > 0) appendNote(`…and ${overflow} more — keep typing`);
   }
 
-  // Live-refresh the bookmarks list when the item's bookmarks change.
+  function renderHighlights(): void {
+    const item = getItem(opts.itemId);
+    const anns = item?.annotations ?? [];
+    if (anns.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "toc__empty faint";
+      empty.textContent = "No highlights yet — select some text while reading.";
+      list.appendChild(empty);
+      return;
+    }
+    // Newest first.
+    const sorted = [...anns].sort((a, b) => b.createdAt - a.createdAt);
+    const { indices, overflow, filtered } = filterByLabel(
+      sorted,
+      query,
+      (a) => `${a.snippet} ${a.note ?? ""}`,
+    );
+    if (filtered && indices.length === 0) {
+      appendNote("No matches");
+      return;
+    }
+    for (const idx of indices) {
+      const ann = sorted[idx]!;
+      const row = document.createElement("div");
+      row.className = "toc__row toc__hl";
+
+      const main = document.createElement("button");
+      main.className = "toc__hl-main";
+      main.type = "button";
+
+      const dot = document.createElement("span");
+      dot.className = `toc__hl-dot hl-c-${ann.color}`;
+
+      const textWrap = document.createElement("span");
+      textWrap.className = "toc__hl-text";
+
+      const title = document.createElement("span");
+      title.className = "toc__row-title";
+      title.textContent = ann.snippet || "Highlight";
+      textWrap.appendChild(title);
+
+      if (ann.note && ann.note.trim()) {
+        const note = document.createElement("span");
+        note.className = "toc__hl-note";
+        note.textContent = ann.note.trim();
+        textWrap.appendChild(note);
+      }
+
+      main.append(dot, textWrap);
+      main.addEventListener("click", () =>
+        opts.onJumpHighlight({ chapter: ann.chapter, block: ann.startBlock, sentence: 0 }),
+      );
+
+      const del = document.createElement("button");
+      del.className = "btn btn--ghost btn--icon btn--sm toc__bookmark-del";
+      del.type = "button";
+      del.title = "Remove highlight";
+      del.innerHTML = icon.x;
+      del.addEventListener("click", (e) => {
+        e.stopPropagation();
+        removeAnnotation(opts.itemId, ann.id);
+      });
+
+      row.append(main, del);
+      list.appendChild(row);
+    }
+    if (overflow > 0) appendNote(`…and ${overflow} more — keep typing`);
+  }
+
+  // Live-refresh bookmarks + highlights when the item's lists change.
   const unsubBookmarks = subscribeSelect(
     libraryStore,
     (idx) => idx.items.find((it: LibraryItem) => it.id === opts.itemId)?.bookmarks,
     () => {
       if (tab === "bookmarks") renderList();
+    },
+  );
+  const unsubAnnotations = subscribeSelect(
+    libraryStore,
+    (idx) => idx.items.find((it: LibraryItem) => it.id === opts.itemId)?.annotations,
+    () => {
+      if (tab === "highlights") renderList();
     },
   );
 
@@ -206,6 +439,8 @@ export function mountToc(host: HTMLElement, opts: TocOptions): TocController {
   return {
     dispose(): void {
       unsubBookmarks();
+      unsubAnnotations();
+      unlistenProgress?.();
       root.remove();
     },
     refresh(): void {

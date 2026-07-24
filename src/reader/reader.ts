@@ -13,15 +13,20 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 import { describeError } from "../core/ipc";
 import { loadDoc } from "../core/import";
 import {
+  addAnnotation,
   addBookmark,
   flushLibrary,
   getItem,
+  libraryStore,
+  removeAnnotation,
   removeBookmark,
   setReadingPosition,
   touchOpened,
+  updateAnnotation,
 } from "../core/library";
 import { formatPct, formatTimeLeft, readingMinutes } from "../core/format";
 import { navigate } from "../core/nav";
+import { normalizeWhitespace } from "../core/segment";
 import { settingsStore, updateReaderPrefs } from "../core/session";
 import { normalizeChord, ShortcutManager } from "../core/shortcuts";
 import { subscribeSelect } from "../core/store";
@@ -31,6 +36,8 @@ import {
   READER_FONTS,
   readerFontStack,
   type ActionId,
+  type Annotation,
+  type AnnotationColor,
   type ContentDoc,
   type Position,
   type ReaderTheme,
@@ -41,6 +48,8 @@ import { toast } from "../ui/toast";
 import { activeWord, engine, engineState } from "../player/engine";
 import { mountPlayerBar } from "../player/bar";
 import {
+  applyAnnotations,
+  blockAnnotationRange,
   buildCharIndex,
   chapterWordCounts,
   createHighlighter,
@@ -49,6 +58,7 @@ import {
   sentenceHitForOffset,
   topmostBlockIndex,
   widthBucketLabel,
+  type AnnRange,
 } from "./render";
 import { mountToc, type TocController } from "./toc";
 
@@ -73,6 +83,32 @@ const THEME_LABELS: Record<ReaderTheme, string> = {
   black: "Black",
 };
 
+const HL_COLORS: AnnotationColor[] = ["yellow", "green", "blue", "pink"];
+const HL_COLOR_LABELS: Record<AnnotationColor, string> = {
+  yellow: "Yellow",
+  green: "Green",
+  blue: "Blue",
+  pink: "Pink",
+};
+
+/** A resolved selection mapped into block/char coordinates of one chapter. */
+interface SelRange {
+  chapter: number;
+  startBlock: number;
+  startChar: number;
+  endBlock: number;
+  endChar: number;
+  snippet: string;
+}
+
+/** The subset of DOMRect the floating-element placer needs. */
+interface RectLike {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+}
+
 export async function mountReader(el: HTMLElement, itemId: string): Promise<ReaderView> {
   const item = getItem(itemId);
   if (!item) {
@@ -95,7 +131,12 @@ export async function mountReader(el: HTMLElement, itemId: string): Promise<Read
 
   const charIndex = buildCharIndex(doc);
   const chWordCounts = chapterWordCounts(doc);
-  const highlighter = createHighlighter();
+  // When a speaking block drops its sentence spans, repaint its highlight marks.
+  const highlighter = createHighlighter((blockEl) => {
+    if (Number(blockEl.dataset.c) === renderedChapter) {
+      applyBlockAnnotations(blockEl, renderedChapter, Number(blockEl.dataset.b));
+    }
+  });
   const chapterCount = doc.chapters.length;
   const wordCount = item.wordCount;
 
@@ -185,6 +226,8 @@ export async function mountReader(el: HTMLElement, itemId: string): Promise<Read
   let renderedChapter = -1;
   let blockEls: HTMLElement[] = [];
   let blockOffsets: number[] = [];
+  // Block indices in the rendered chapter currently showing highlight marks.
+  const markedBlocks = new Set<number>();
 
   function measure(): void {
     const scrollTop = scroll.getBoundingClientRect().top;
@@ -198,10 +241,72 @@ export async function mountReader(el: HTMLElement, itemId: string): Promise<Read
     renderedChapter = target;
     renderChapter(surface, doc, target, { imageSrc: toAssetUrl });
     blockEls = Array.from(surface.querySelectorAll<HTMLElement>("[data-b]"));
+    markedBlocks.clear();
+    applyAllAnnotations();
     measure();
     updateChapterLabel();
     toc.refresh();
     syncHighlight();
+  }
+
+  /* ---------------- highlight marks (annotations) ---------------- */
+
+  // Char ranges every annotation covers within one block of the current chapter.
+  function annRangesForBlock(chapter: number, block: number): AnnRange<Annotation>[] {
+    const anns = getItem(itemId)?.annotations;
+    if (!anns || anns.length === 0) return [];
+    const text = doc.chapters[chapter]?.blocks[block]?.text ?? "";
+    if (!text) return [];
+    const out: AnnRange<Annotation>[] = [];
+    for (const ann of anns) {
+      if (ann.chapter !== chapter) continue;
+      const r = blockAnnotationRange(ann, block, text.length);
+      if (r) out.push({ ann, startChar: r.startChar, endChar: r.endChar });
+    }
+    return out;
+  }
+
+  // Paint (or strip) one block's marks. Never touches the speaking block, which
+  // shows sentence spans instead; its marks are restored when spans are dropped.
+  function applyBlockAnnotations(blockEl: HTMLElement, chapter: number, block: number): void {
+    if (blockEl.dataset.spanned === "1") return;
+    const text = doc.chapters[chapter]?.blocks[block]?.text ?? "";
+    const ranges = annRangesForBlock(chapter, block);
+    if (ranges.length === 0) {
+      if (blockEl.querySelector("mark[data-ann]")) blockEl.textContent = text;
+      markedBlocks.delete(block);
+      return;
+    }
+    applyAnnotations(blockEl, text, ranges);
+    markedBlocks.add(block);
+  }
+
+  function applyAllAnnotations(): void {
+    const anns = getItem(itemId)?.annotations;
+    if (!anns || anns.length === 0) return;
+    const blocks = new Set<number>();
+    for (const ann of anns) {
+      if (ann.chapter !== renderedChapter) continue;
+      for (let b = ann.startBlock; b <= ann.endBlock; b++) blocks.add(b);
+    }
+    for (const b of blocks) {
+      const el = blockElByIndex(b);
+      if (el) applyBlockAnnotations(el, renderedChapter, b);
+    }
+  }
+
+  // Re-sync every mark in the chapter to the live annotation list. Strips blocks
+  // that lost their annotations, then re-applies the rest — covers create,
+  // color/note edits, and deletes (including edits from the Highlights tab).
+  function refreshAnnotations(): void {
+    for (const b of [...markedBlocks]) {
+      const el = blockElByIndex(b);
+      if (el && el.dataset.spanned !== "1" && el.querySelector("mark[data-ann]")) {
+        el.textContent = doc.chapters[renderedChapter]?.blocks[b]?.text ?? "";
+      }
+    }
+    markedBlocks.clear();
+    applyAllAnnotations();
   }
 
   function blockElByIndex(blockIndex: number): HTMLElement | undefined {
@@ -402,6 +507,10 @@ export async function mountReader(el: HTMLElement, itemId: string): Promise<Read
       if (isNarrow()) setToc(false);
     },
     onJumpBookmark: (pos) => {
+      jumpTo(pos, true);
+      if (isNarrow()) setToc(false);
+    },
+    onJumpHighlight: (pos) => {
       jumpTo(pos, true);
       if (isNarrow()) setToc(false);
     },
@@ -725,6 +834,13 @@ export async function mountReader(el: HTMLElement, itemId: string): Promise<Read
     (s) => s.playback.highlight,
     () => syncHighlight(),
   );
+  // Repaint marks whenever this item's annotations change (create/edit/delete),
+  // including edits made from the Highlights tab.
+  const unsubAnnotations = subscribeSelect(
+    libraryStore,
+    (idx) => idx.items.find((it) => it.id === itemId)?.annotations,
+    () => refreshAnnotations(),
+  );
 
   let lastPosKey = "";
   const unsubEngine = engineState.subscribe((s) => {
@@ -815,15 +931,28 @@ export async function mountReader(el: HTMLElement, itemId: string): Promise<Read
     clickDownBad = e.button !== 0 || e.ctrlKey || e.shiftKey || e.altKey || e.metaKey;
   };
   const onSurfacePointerUp = (e: PointerEvent): void => {
-    // Clean primary click only: no modifiers, no drag, no active selection.
+    // A live (non-collapsed) selection is a highlight gesture, not a tap-to-read
+    // one — show the highlight toolbar and stop. The click-to-read path below is
+    // only ever reached with a COLLAPSED selection, so the two never conflict.
+    const sel = window.getSelection();
+    if (sel && !sel.isCollapsed && sel.rangeCount > 0) {
+      showHlToolbar(sel);
+      return;
+    }
+    // Clean primary click only: no modifiers, no drag.
     if (clickDownBad || e.button !== 0 || e.ctrlKey || e.shiftKey || e.altKey || e.metaKey) return;
     const dx = e.clientX - clickDownX;
     const dy = e.clientY - clickDownY;
     if (dx * dx + dy * dy >= 36) return; // moved >= 6px → treat as a drag, not a click
-    const sel = window.getSelection();
-    if (sel && !sel.isCollapsed) return; // drag- or double-click selection: leave it alone
     const target = e.target as HTMLElement | null;
-    if (!target || target.closest("img, hr, a, .reader-chapter-title")) return;
+    if (!target) return;
+    // Click on an existing highlight → open its editor, not read-from-here.
+    const mark = target.closest<HTMLElement>("mark[data-ann]");
+    if (mark?.dataset.ann) {
+      openAnnotationPopover(mark.dataset.ann, false, mark.getBoundingClientRect());
+      return;
+    }
+    if (target.closest("img, hr, a, .reader-chapter-title")) return;
     const hit = resolveClickPos(e.clientX, e.clientY);
     // Start at the exact clicked word (in-sentence char offset), not the top of
     // the sentence — the engine seeks to that word when boundaries exist.
@@ -831,6 +960,255 @@ export async function mountReader(el: HTMLElement, itemId: string): Promise<Read
   };
   surface.addEventListener("pointerdown", onSurfacePointerDown);
   surface.addEventListener("pointerup", onSurfacePointerUp);
+
+  /* ---------------- highlight create / edit toolbars ---------------- */
+
+  let hlToolbar: HTMLElement | null = null;
+  let hlPop: HTMLElement | null = null;
+  let pendingRange: SelRange | null = null;
+  let hlPopFlush: (() => void) | null = null;
+
+  // Place a fixed-position floating element centered over an anchor rect,
+  // preferring above/below, clamped into the viewport.
+  function placeFloating(elm: HTMLElement, anchor: RectLike, prefer: "above" | "below"): void {
+    elm.style.visibility = "hidden";
+    elm.style.left = "0px";
+    elm.style.top = "0px";
+    const r = elm.getBoundingClientRect();
+    const pad = 8;
+    const cx = (anchor.left + anchor.right) / 2;
+    const left = clamp(cx - r.width / 2, pad, Math.max(pad, window.innerWidth - r.width - pad));
+    let top = prefer === "above" ? anchor.top - r.height - pad : anchor.bottom + pad;
+    if (prefer === "above" && top < pad) top = anchor.bottom + pad; // flip below if no room
+    top = clamp(top, pad, Math.max(pad, window.innerHeight - r.height - pad));
+    elm.style.left = `${left}px`;
+    elm.style.top = `${top}px`;
+    elm.style.visibility = "";
+  }
+
+  // The [data-b] block element containing a node, if within the reader surface.
+  function nodeBlockEl(node: Node | null): HTMLElement | null {
+    const el = node?.nodeType === Node.TEXT_NODE ? node.parentElement : (node as HTMLElement | null);
+    const block = el?.closest<HTMLElement>("[data-b]") ?? null;
+    return block && surface.contains(block) ? block : null;
+  }
+
+  // Map a live selection to block/char coordinates of the rendered chapter. Both
+  // endpoints must land in [data-b] blocks of this chapter; a range that starts
+  // or ends outside them clamps to the first/last block it actually covers.
+  function resolveSelectionRange(sel: Selection): SelRange | null {
+    if (sel.rangeCount === 0) return null;
+    const range = sel.getRangeAt(0);
+    const covered = blockEls.filter(
+      (el) => Number(el.dataset.c) === renderedChapter && range.intersectsNode(el),
+    );
+    if (covered.length === 0) return null;
+    const startBlockEl = covered[0]!;
+    const endBlockEl = covered[covered.length - 1]!;
+    const startBlock = Number(startBlockEl.dataset.b);
+    const endBlock = Number(endBlockEl.dataset.b);
+    const startText = doc.chapters[renderedChapter]?.blocks[startBlock]?.text ?? "";
+    const endText = doc.chapters[renderedChapter]?.blocks[endBlock]?.text ?? "";
+    let startChar = 0;
+    if (range.startContainer.nodeType === Node.TEXT_NODE && nodeBlockEl(range.startContainer) === startBlockEl) {
+      startChar = charOffsetInBlock(startBlockEl, range.startContainer, range.startOffset);
+    }
+    let endChar = endText.length;
+    if (range.endContainer.nodeType === Node.TEXT_NODE && nodeBlockEl(range.endContainer) === endBlockEl) {
+      endChar = charOffsetInBlock(endBlockEl, range.endContainer, range.endOffset);
+    }
+    startChar = Math.max(0, Math.min(startChar, startText.length));
+    endChar = Math.max(0, Math.min(endChar, endText.length));
+    if (startBlock === endBlock && endChar <= startChar) return null;
+    const snippet = normalizeWhitespace(range.toString()).slice(0, 80);
+    if (!snippet) return null;
+    return { chapter: renderedChapter, startBlock, startChar, endBlock, endChar, snippet };
+  }
+
+  const onHlToolbarOutside = (e: PointerEvent): void => {
+    if (hlToolbar && !hlToolbar.contains(e.target as Node)) hideHlToolbar();
+  };
+  const onHlToolbarKey = (e: KeyboardEvent): void => {
+    if (e.key === "Escape" && hlToolbar) {
+      e.preventDefault();
+      e.stopPropagation();
+      hideHlToolbar();
+    }
+  };
+  const onHlSelectionChange = (): void => {
+    const s = window.getSelection();
+    if (hlToolbar && (!s || s.isCollapsed)) hideHlToolbar();
+  };
+
+  function hideHlToolbar(): void {
+    if (!hlToolbar) return;
+    hlToolbar.remove();
+    hlToolbar = null;
+    pendingRange = null;
+    document.removeEventListener("pointerdown", onHlToolbarOutside, true);
+    document.removeEventListener("keydown", onHlToolbarKey, true);
+    document.removeEventListener("selectionchange", onHlSelectionChange);
+  }
+
+  function showHlToolbar(sel: Selection): void {
+    const resolved = resolveSelectionRange(sel);
+    hideHlToolbar();
+    closeAnnotationPopover();
+    if (!resolved) return;
+    pendingRange = resolved;
+
+    const bar = document.createElement("div");
+    bar.className = "hl-toolbar";
+    bar.innerHTML =
+      HL_COLORS.map(
+        (c) =>
+          `<button type="button" class="hl-dot hl-c-${c}" data-color="${c}" title="${HL_COLOR_LABELS[c]}" aria-label="Highlight ${HL_COLOR_LABELS[c].toLowerCase()}"></button>`,
+      ).join("") +
+      `<span class="hl-toolbar__sep" aria-hidden="true"></span>` +
+      `<button type="button" class="btn btn--ghost btn--sm hl-toolbar__note">Note</button>`;
+    root.appendChild(bar);
+    hlToolbar = bar;
+
+    const rects = sel.getRangeAt(0).getClientRects();
+    const anchor = rects.length ? rects[rects.length - 1]! : sel.getRangeAt(0).getBoundingClientRect();
+    placeFloating(bar, anchor, "above");
+
+    bar.addEventListener("click", (e) => {
+      const dot = (e.target as HTMLElement).closest<HTMLElement>("[data-color]");
+      if (dot?.dataset.color) {
+        createAnnotation(dot.dataset.color as AnnotationColor, false);
+      } else if ((e.target as HTMLElement).closest(".hl-toolbar__note")) {
+        createAnnotation("yellow", true);
+      }
+    });
+
+    // Defer so the opening pointerup doesn't immediately dismiss the toolbar.
+    setTimeout(() => {
+      if (!hlToolbar) return;
+      document.addEventListener("pointerdown", onHlToolbarOutside, true);
+      document.addEventListener("keydown", onHlToolbarKey, true);
+      document.addEventListener("selectionchange", onHlSelectionChange);
+    });
+  }
+
+  function createAnnotation(color: AnnotationColor, openNote: boolean): void {
+    const r = pendingRange;
+    if (!r) {
+      hideHlToolbar();
+      return;
+    }
+    const ann: Annotation = {
+      id: crypto.randomUUID(),
+      color,
+      chapter: r.chapter,
+      startBlock: r.startBlock,
+      startChar: r.startChar,
+      endBlock: r.endBlock,
+      endChar: r.endChar,
+      snippet: r.snippet,
+      createdAt: Date.now(),
+    };
+    hideHlToolbar();
+    addAnnotation(itemId, ann);
+    window.getSelection()?.removeAllRanges();
+    // Paint immediately (the store subscription also fires, on a microtask).
+    refreshAnnotations();
+    if (openNote) {
+      const el = blockElByIndex(ann.startBlock)?.querySelector<HTMLElement>(`mark[data-ann="${ann.id}"]`);
+      openAnnotationPopover(ann.id, true, el ? el.getBoundingClientRect() : null);
+    }
+  }
+
+  const onHlPopOutside = (e: PointerEvent): void => {
+    if (hlPop && !hlPop.contains(e.target as Node)) closeAnnotationPopover();
+  };
+  const onHlPopKey = (e: KeyboardEvent): void => {
+    if (e.key === "Escape" && hlPop) {
+      e.preventDefault();
+      e.stopPropagation();
+      closeAnnotationPopover();
+    }
+  };
+
+  function closeAnnotationPopover(): void {
+    if (!hlPop) return;
+    hlPopFlush?.();
+    hlPopFlush = null;
+    hlPop.remove();
+    hlPop = null;
+    document.removeEventListener("pointerdown", onHlPopOutside, true);
+    document.removeEventListener("keydown", onHlPopKey, true);
+  }
+
+  function openAnnotationPopover(annId: string, focusNote: boolean, anchor: RectLike | null): void {
+    closeAnnotationPopover();
+    hideHlToolbar();
+    const getAnn = (): Annotation | undefined =>
+      getItem(itemId)?.annotations?.find((a) => a.id === annId);
+    const ann = getAnn();
+    if (!ann) return;
+
+    const popEl = document.createElement("div");
+    popEl.className = "hl-pop";
+    popEl.innerHTML = `
+      <div class="hl-pop__dots">
+        ${HL_COLORS.map(
+          (c) =>
+            `<button type="button" class="hl-dot hl-c-${c}" data-color="${c}" title="${HL_COLOR_LABELS[c]}" aria-label="${HL_COLOR_LABELS[c]}"></button>`,
+        ).join("")}
+      </div>
+      <textarea class="input hl-pop__note" placeholder="Add a note" spellcheck="true"></textarea>
+      <button type="button" class="btn btn--ghost btn--danger btn--sm hl-pop__del">Delete</button>`;
+    root.appendChild(popEl);
+    hlPop = popEl;
+
+    const note = popEl.querySelector<HTMLTextAreaElement>(".hl-pop__note")!;
+    note.value = ann.note ?? "";
+
+    const paintDots = (color: AnnotationColor): void => {
+      popEl.querySelectorAll<HTMLElement>("[data-color]").forEach((d) => {
+        d.classList.toggle("hl-dot--on", d.dataset.color === color);
+      });
+    };
+    paintDots(ann.color);
+
+    popEl.querySelector(".hl-pop__dots")!.addEventListener("click", (e) => {
+      const dot = (e.target as HTMLElement).closest<HTMLElement>("[data-color]");
+      if (!dot?.dataset.color) return;
+      const color = dot.dataset.color as AnnotationColor;
+      updateAnnotation(itemId, annId, { color });
+      paintDots(color);
+    });
+
+    let noteTimer: number | undefined;
+    note.addEventListener("input", () => {
+      window.clearTimeout(noteTimer);
+      noteTimer = window.setTimeout(() => updateAnnotation(itemId, annId, { note: note.value }), 400);
+    });
+    hlPopFlush = (): void => {
+      window.clearTimeout(noteTimer);
+      const cur = getAnn();
+      if (cur && (cur.note ?? "") !== note.value) updateAnnotation(itemId, annId, { note: note.value });
+    };
+
+    popEl.querySelector(".hl-pop__del")!.addEventListener("click", () => {
+      hlPopFlush = null; // don't flush a note write for an annotation we're deleting
+      closeAnnotationPopover();
+      removeAnnotation(itemId, annId);
+    });
+
+    placeFloating(
+      popEl,
+      anchor ?? { left: window.innerWidth / 2, right: window.innerWidth / 2, top: 96, bottom: 96 },
+      "below",
+    );
+    if (focusNote) setTimeout(() => note.focus());
+    setTimeout(() => {
+      if (!hlPop) return;
+      document.addEventListener("pointerdown", onHlPopOutside, true);
+      document.addEventListener("keydown", onHlPopKey, true);
+    });
+  }
 
   /* ---------------- scroll + resize ---------------- */
 
@@ -859,10 +1237,12 @@ export async function mountReader(el: HTMLElement, itemId: string): Promise<Read
       if (disposed) return;
       disposed = true;
 
-      // Leaving the book stops playback (position persists, so reopening resumes
-      // from the same spot showing paused). Window-close/tray keeps playing and
-      // is handled in main.ts. pause() is a no-op when nothing is playing.
-      engine.pause();
+      // With the mini player enabled (default), leaving the reader keeps playback
+      // going — the library shows a compact now-playing bar (sibling-built). With
+      // it off, leaving pauses (position persists, so reopening resumes from the
+      // same spot showing paused). Window-close/tray keeps playing and is handled
+      // in main.ts. pause() is a no-op when nothing is playing.
+      if (!settingsStore.get().miniPlayer) engine.pause();
 
       // Persist the reading position immediately.
       const pos = currentTopPos();
@@ -872,12 +1252,15 @@ export async function mountReader(el: HTMLElement, itemId: string): Promise<Read
       unsubReader();
       unsubShortcuts();
       unsubHighlightMode();
+      unsubAnnotations();
       unsubEngine();
       unsubWord();
       sc.detach();
       bar.dispose();
       toc.dispose();
       closeAa();
+      hideHlToolbar();
+      closeAnnotationPopover();
       for (const close of openCloseFns.splice(0)) close();
 
       surface.removeEventListener("pointerdown", onSurfacePointerDown);

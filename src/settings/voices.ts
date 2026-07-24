@@ -7,7 +7,13 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 import { escapeHtml } from "../core/format";
-import { describeError, ipc, onDownloadProgress, type DownloadProgress } from "../core/ipc";
+import {
+  describeError,
+  ipc,
+  onDownloadProgress,
+  type DownloadProgress,
+  type KokoroStatus,
+} from "../core/ipc";
 import { settingsStore, updatePlaybackPrefs } from "../core/session";
 import { subscribeSelect } from "../core/store";
 import { PROVIDER_LABELS } from "../core/types";
@@ -49,6 +55,20 @@ export function piperTaskBase(taskId: string): string | null {
   if (taskId.startsWith("piper-model-")) {
     return taskId.endsWith("-cfg") ? taskId.slice(0, -4) : taskId;
   }
+  return null;
+}
+
+/** Download task id for the Kokoro engine binary. */
+export const KOKORO_ENGINE_TASK = "kokoro-engine";
+
+/** Download task id for the Kokoro voice model bundle (all voices). */
+export const KOKORO_MODEL_TASK = "kokoro-model";
+
+/** Normalize a Kokoro download task id back to its owning row's base id, or
+ *  null when the task isn't a Kokoro task. */
+export function kokoroTaskBase(taskId: string): string | null {
+  if (taskMatches(taskId, KOKORO_ENGINE_TASK)) return KOKORO_ENGINE_TASK;
+  if (taskMatches(taskId, KOKORO_MODEL_TASK)) return KOKORO_MODEL_TASK;
   return null;
 }
 
@@ -126,7 +146,8 @@ export function previewCostsCredits(provider: ProviderId): boolean {
 const PROVIDER_DESC: Record<string, string> = {
   edge: "Free Microsoft neural voices. Requires internet.",
   system: "Voices installed in Windows. Always available, fully offline.",
-  piper: "Downloadable neural voices that run fully offline on your PC.",
+  kokoro: "Higher-quality local voices. One download covers all 11 voices. Fully offline.",
+  piper: "Compact local voices. Each voice is a separate small download.",
   eleven: "Your ElevenLabs voices via your API key.",
   openai: "OpenAI voices via your API key. Requires internet.",
   speechify: "Speechify's Simba voices via your API key. Requires internet.",
@@ -145,6 +166,12 @@ export function mountVoices(container: HTMLElement, ctx: VoicesCtx): { dispose()
   let piperError = false;
   let piperPath: string | null = null;
   let piperCard: HTMLElement | null = null;
+
+  // Kokoro download-manager state (shares the `progress` map — task-id
+  // namespaces are disjoint: "piper-*" vs "kokoro-*").
+  let kokoro: KokoroStatus | null = null;
+  let kokoroError = false;
+  let kokoroCard: HTMLElement | null = null;
 
   // Default-voice display.
   let defaultVoiceName: string | null = null;
@@ -519,15 +546,30 @@ export function mountVoices(container: HTMLElement, ctx: VoicesCtx): { dispose()
       }
     }
 
+    const rerenderPiper = (): void => {
+      if (piperCard) renderPiper(piperCard);
+    };
     card
       .querySelector<HTMLButtonElement>("[data-binary-dl]")
       ?.addEventListener("click", () =>
-        void startDownload(PIPER_BINARY_TASK, "Voice engine", () => ipc.piperInstallBinary()),
+        void startDownload(
+          PIPER_BINARY_TASK,
+          "Voice engine",
+          () => ipc.piperInstallBinary(),
+          rerenderPiper,
+          refreshPiper,
+        ),
       );
     card.querySelectorAll<HTMLButtonElement>("[data-model-dl]").forEach((btn) => {
       const id = btn.dataset.modelDl!;
       btn.addEventListener("click", () =>
-        void startDownload(piperModelTask(id), "Voice", () => ipc.piperInstallModel(id)),
+        void startDownload(
+          piperModelTask(id),
+          "Voice",
+          () => ipc.piperInstallModel(id),
+          rerenderPiper,
+          refreshPiper,
+        ),
       );
     });
     card.querySelectorAll<HTMLButtonElement>("[data-model-remove]").forEach((btn) => {
@@ -600,21 +642,23 @@ export function mountVoices(container: HTMLElement, ctx: VoicesCtx): { dispose()
     base: string,
     label: string,
     run: () => Promise<void>,
+    rerender: () => void,
+    refresh: () => Promise<void>,
   ): Promise<void> {
     // Optimistically show a progress row; events refine it, the command's
     // resolution (or a done/error event) clears it.
     progress.set(base, { taskId: base, label, received: 0, total: null, done: false, error: null });
-    if (piperCard) renderPiper(piperCard);
+    rerender();
     try {
       await run();
       if (progress.has(base)) {
         progress.delete(base);
-        await refreshPiper();
+        await refresh();
       }
     } catch (e) {
       progress.delete(base);
       toast.error(describeError(e));
-      await refreshPiper();
+      await refresh();
     }
   }
 
@@ -638,15 +682,20 @@ export function mountVoices(container: HTMLElement, ctx: VoicesCtx): { dispose()
     await refreshPiper();
   }
 
-  function paintProgress(base: string, p: DownloadProgress): void {
-    if (!piperCard) return;
-    const wrap = piperCard.querySelector<HTMLElement>(`[data-progress="${base}"]`);
+  function paintProgress(
+    card: HTMLElement | null,
+    base: string,
+    p: DownloadProgress,
+    rerender: () => void,
+  ): void {
+    if (!card) return;
+    const wrap = card.querySelector<HTMLElement>(`[data-progress="${base}"]`);
     if (!wrap) {
-      renderPiper(piperCard);
+      rerender();
       return;
     }
     const fill = wrap.querySelector<HTMLElement>(".progress__fill");
-    const pctEl = piperCard.querySelector<HTMLElement>(`[data-progress-pct="${base}"]`);
+    const pctEl = card.querySelector<HTMLElement>(`[data-progress-pct="${base}"]`);
     const pct = downloadPct(p.received, p.total);
     if (pct === null) {
       wrap.classList.add("progress--indeterminate");
@@ -660,23 +709,185 @@ export function mountVoices(container: HTMLElement, ctx: VoicesCtx): { dispose()
 
   function onProgress(p: DownloadProgress): void {
     if (disposed) return;
-    const base = piperTaskBase(p.taskId);
+    // Route to the owning manager — piper and kokoro share the progress map.
+    const piperBase = piperTaskBase(p.taskId);
+    const kokoroBase = piperBase ? null : kokoroTaskBase(p.taskId);
+    const base = piperBase ?? kokoroBase;
     if (!base) return;
+    const isPiper = piperBase !== null;
+    const card = isPiper ? piperCard : kokoroCard;
+    const rerender = (): void => {
+      if (isPiper) {
+        if (piperCard) renderPiper(piperCard);
+      } else if (kokoroCard) {
+        renderKokoro(kokoroCard);
+      }
+    };
+    const refresh = isPiper ? refreshPiper : refreshKokoro;
     if (p.error) {
       progress.delete(base);
       toast.error(p.error);
-      void refreshPiper();
+      void refresh();
       return;
     }
     if (p.done) {
       progress.delete(base);
-      void refreshPiper();
+      void refresh();
       return;
     }
     const had = progress.has(base);
     progress.set(base, p);
-    if (had) paintProgress(base, p);
-    else if (piperCard) renderPiper(piperCard);
+    if (had) paintProgress(card, base, p, rerender);
+    else rerender();
+  }
+
+  /* ---------------- kokoro download manager ---------------- */
+
+  function kokoroEngineRowHtml(s: KokoroStatus): string {
+    const dl = progress.get(KOKORO_ENGINE_TASK);
+    const info = (meta: string): string =>
+      `<div class="set-model-info"><div class="set-model-name">Voice engine</div><div class="set-model-meta">${escapeHtml(meta)}</div></div>`;
+    if (dl) {
+      return `<div class="set-model-row">${info("Downloading…")}${progressCtrlHtml(KOKORO_ENGINE_TASK, dl)}</div>`;
+    }
+    if (s.engineInstalled) {
+      return `<div class="set-model-row">${info(`${formatMB(s.engineSizeMB)} · installed`)}<div class="set-model-ctrl set-model-ctrl--done">${icon.check}<span>Installed</span></div></div>`;
+    }
+    return `<div class="set-model-row">${info(`Required for Kokoro voices · ${formatMB(s.engineSizeMB)}`)}<div class="set-model-ctrl"><button type="button" class="btn btn--sm btn--primary" data-kokoro-engine-dl>${icon.download}Download</button></div></div>`;
+  }
+
+  function kokoroModelRowHtml(s: KokoroStatus): string {
+    const dl = progress.get(KOKORO_MODEL_TASK);
+    const info = (meta: string): string =>
+      `<div class="set-model-info"><div class="set-model-name">All voices</div><div class="set-model-meta">${escapeHtml(meta)}</div></div>`;
+    if (dl) {
+      return `<div class="set-model-row">${info("Downloading…")}${progressCtrlHtml(KOKORO_MODEL_TASK, dl)}</div>`;
+    }
+    if (s.modelInstalled) {
+      return `<div class="set-model-row">${info(`${formatMB(s.modelSizeMB)} · installed`)}<div class="set-model-ctrl set-model-ctrl--done">${icon.check}<span>Installed</span></div></div>`;
+    }
+    // Gated until the engine is present (the model is useless without it).
+    const gate = s.engineInstalled ? "" : 'disabled title="Download the voice engine first"';
+    return `<div class="set-model-row">${info(`All 11 voices · ${formatMB(s.modelSizeMB)}`)}<div class="set-model-ctrl"><button type="button" class="btn btn--sm" data-kokoro-model-dl ${gate}>${icon.download}Download</button></div></div>`;
+  }
+
+  function kokoroInstalledFooterHtml(): string {
+    return `<div class="set-voice-storage">
+      <span class="set-kokoro-installed">${icon.check}<span>Engine and voices installed</span></span>
+      <div class="set-voice-storage__actions">
+        <button type="button" class="btn btn--sm btn--ghost set-danger-hover" data-kokoro-remove>Remove Kokoro</button>
+      </div>
+    </div>`;
+  }
+
+  function renderKokoro(card: HTMLElement): void {
+    const bothInstalled = !!kokoro && kokoro.engineInstalled && kokoro.modelInstalled;
+    let html = providerHeaderHtml(PROVIDER_LABELS.kokoro);
+    html += `<div class="set-provider-desc">${escapeHtml(PROVIDER_DESC.kokoro ?? "")}</div>`;
+    if (kokoroError) {
+      html += `<div class="set-voice-reason">Couldn't read Kokoro status.</div>`;
+    } else if (!kokoro) {
+      html += `<div class="set-voice-loading">${icon.refresh}<span>Loading…</span></div>`;
+    } else if (bothInstalled) {
+      // Both installed: the two download rows collapse to a footer and the
+      // standard voice list (preview + set-default) takes the card body.
+      html += `<div class="set-voice-slot" data-kokoro-voices></div>`;
+      html += kokoroInstalledFooterHtml();
+    } else {
+      html += kokoroEngineRowHtml(kokoro);
+      html += kokoroModelRowHtml(kokoro);
+    }
+    card.innerHTML = html;
+
+    // Availability chip, derived from status (avoids a second IPC round-trip).
+    const chip = card.querySelector<HTMLElement>("[data-chip]");
+    if (chip) {
+      if (kokoroError) applyChip(chip, { ok: false, reason: "Unavailable" });
+      else if (!kokoro) {
+        /* keep pending */
+      } else if (bothInstalled) {
+        applyChip(chip, { ok: true });
+      } else {
+        applyChip(chip, { ok: false, reason: "Not downloaded yet" });
+      }
+    }
+
+    if (!kokoro || kokoroError) return;
+
+    if (bothInstalled) {
+      const slot = card.querySelector<HTMLElement>("[data-kokoro-voices]");
+      if (slot) {
+        const voices: VoiceInfo[] = kokoro.voices.map((v) => ({
+          provider: "kokoro" as const,
+          id: v.id,
+          name: v.name,
+          locale: v.locale,
+          gender: v.gender,
+          installed: true,
+        }));
+        if (voices.length) renderVoiceRows(slot, "kokoro", voices);
+        else slot.innerHTML = `<div class="set-voice-reason">No voices available.</div>`;
+      }
+      card
+        .querySelector<HTMLButtonElement>("[data-kokoro-remove]")
+        ?.addEventListener("click", () => {
+          confirmModal({
+            title: "Remove Kokoro?",
+            message: "The Kokoro engine and all its voices are deleted from this PC.",
+            confirmLabel: "Remove Kokoro",
+            danger: true,
+            onConfirm: () => void removeKokoro(),
+          });
+        });
+      return;
+    }
+
+    const rerenderKokoro = (): void => {
+      if (kokoroCard) renderKokoro(kokoroCard);
+    };
+    card
+      .querySelector<HTMLButtonElement>("[data-kokoro-engine-dl]")
+      ?.addEventListener("click", () =>
+        void startDownload(
+          KOKORO_ENGINE_TASK,
+          "Voice engine",
+          () => ipc.kokoroInstallEngine(),
+          rerenderKokoro,
+          refreshKokoro,
+        ),
+      );
+    card
+      .querySelector<HTMLButtonElement>("[data-kokoro-model-dl]")
+      ?.addEventListener("click", () =>
+        void startDownload(
+          KOKORO_MODEL_TASK,
+          "All voices",
+          () => ipc.kokoroInstallModel(),
+          rerenderKokoro,
+          refreshKokoro,
+        ),
+      );
+  }
+
+  async function refreshKokoro(): Promise<void> {
+    try {
+      kokoro = await ipc.kokoroStatus();
+      kokoroError = false;
+    } catch {
+      kokoro = null;
+      kokoroError = true;
+    }
+    if (!disposed && kokoroCard) renderKokoro(kokoroCard);
+  }
+
+  async function removeKokoro(): Promise<void> {
+    try {
+      await ipc.kokoroRemove();
+      toast.info("Kokoro removed");
+    } catch (e) {
+      toast.error(`Couldn't remove Kokoro: ${describeError(e)}`);
+    }
+    await refreshKokoro();
   }
 
   /* ---------------- voice chooser modal ---------------- */
@@ -766,11 +977,15 @@ export function mountVoices(container: HTMLElement, ctx: VoicesCtx): { dispose()
     if (provider.id === "piper") {
       piperCard = card;
       renderPiper(card);
+    } else if (provider.id === "kokoro") {
+      kokoroCard = card;
+      renderKokoro(card);
     } else {
       buildInfoCard(card, provider);
     }
   }
   void refreshPiper();
+  void refreshKokoro();
   void loadPath();
 
   void onDownloadProgress(onProgress).then((fn) => {

@@ -6,7 +6,7 @@
 
 import "./library.css";
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { describeError, ipc } from "../core/ipc";
+import { describeError, ipc, onDownloadProgress } from "../core/ipc";
 import {
   addCollection,
   getItem,
@@ -17,13 +17,17 @@ import {
   updateItem,
 } from "../core/library";
 import { navigate } from "../core/nav";
-import { escapeHtml, formatTimeLeft, readingMinutes } from "../core/format";
-import type { LibraryIndex, LibraryItem, SourceType } from "../core/types";
-import { POSITION_ZERO } from "../core/types";
+import { escapeHtml, formatBytes, formatTimeLeft, readingMinutes } from "../core/format";
+import { loadDoc } from "../core/import";
+import { splitSentences } from "../core/segment";
+import { settingsStore } from "../core/session";
+import type { AudioQuality, LibraryIndex, LibraryItem, ProviderId, SourceType } from "../core/types";
+import { audioBytesPerSecond, POSITION_ZERO } from "../core/types";
 import { trapTab } from "../ui/focus";
 import { icon } from "../ui/icons";
 import { closeMenu, showMenu, type MenuItem } from "../ui/menu";
 import { toast } from "../ui/toast";
+import { mountMiniPlayer } from "./mini-player";
 
 export interface LibraryView {
   dispose(): void | Promise<void>;
@@ -36,6 +40,87 @@ let activeFilter = "all";
 let activeSort: SortKey = "recent";
 
 const GRAD_COUNT = 8;
+
+// Whole-book "prepare audio" (pre-synthesis) progress, keyed by item id. Lives
+// module-level so a card renderer can read it and it survives re-renders; the
+// backend runs one precache job at a time. The active library view registers
+// its re-render here so module-level actions can refresh cards.
+const precacheProgress = new Map<string, { received: number; total: number }>();
+let notifyRender: () => void = () => {};
+
+/** Rough size (bytes) to pre-synthesize a whole book, from its word count:
+ *  listeningSeconds = words / 155 wpm × 60, times the provider's bytes-per-second
+ *  at the chosen quality. Pure — unit-tested. */
+export function prepareAudioBytes(
+  wordCount: number,
+  provider: ProviderId,
+  quality: AudioQuality,
+): number {
+  const listeningSeconds = (Math.max(0, wordCount) / 155) * 60;
+  return Math.round(listeningSeconds * audioBytesPerSecond(provider, quality));
+}
+
+/** The estimate shown in the card menu — uses the item's own voice, else the
+ *  global default, else the free Edge provider as a ballpark. */
+function prepareEstimate(item: LibraryItem): number {
+  const voice = item.voice ?? settingsStore.get().playback.voice;
+  const provider: ProviderId = voice?.provider ?? "edge";
+  return prepareAudioBytes(item.wordCount, provider, settingsStore.get().audioQuality);
+}
+
+/** Update just one card's prepare-overlay fill in place (avoids a full grid
+ *  re-render on every per-sentence progress tick). */
+function updateCardProgress(id: string): void {
+  const prog = precacheProgress.get(id);
+  if (!prog) return;
+  const fill = document.querySelector<HTMLElement>(`.lib-card[data-id="${id}"] .lib-prep__fill`);
+  if (fill) fill.style.width = `${prog.total > 0 ? Math.round((prog.received / prog.total) * 100) : 0}%`;
+}
+
+async function prepareAudio(item: LibraryItem): Promise<void> {
+  const voice = item.voice ?? settingsStore.get().playback.voice;
+  if (!voice) {
+    toast.error("Pick a voice first — press play once or choose one in Settings");
+    return;
+  }
+  // The backend runs one job at a time; if another item is already preparing,
+  // let the backend reject and surface its message without disturbing that job.
+  const otherRunning = precacheProgress.size > 0 && !precacheProgress.has(item.id);
+  try {
+    const doc = await loadDoc(item.id);
+    const texts: string[] = [];
+    for (const ch of doc.chapters) {
+      for (const b of ch.blocks) {
+        if (b.t !== "img" && b.t !== "hr" && b.text?.trim()) {
+          for (const s of splitSentences(b.text)) texts.push(s.text);
+        }
+      }
+    }
+    if (texts.length === 0) {
+      toast.error("This item has no readable text to prepare");
+      return;
+    }
+    if (!otherRunning) {
+      precacheProgress.set(item.id, { received: 0, total: texts.length });
+      notifyRender();
+    }
+    await ipc.precache(voice.provider, voice.id, texts, `precache-item-${item.id}`, item.title);
+    // Completion (the "ready" toast + overlay removal) is driven by the
+    // download-progress 'done' event; clear defensively if that was missed.
+    if (precacheProgress.has(item.id)) {
+      precacheProgress.delete(item.id);
+      notifyRender();
+    }
+  } catch (e) {
+    if (!otherRunning) {
+      precacheProgress.delete(item.id);
+      notifyRender();
+    }
+    // A cancel rejects the same call — that's not an error worth a toast.
+    const msg = describeError(e);
+    if (msg !== "Cancelled") toast.error(msg);
+  }
+}
 
 /* ================= pure card helpers ================= */
 
@@ -106,12 +191,17 @@ function cardHtml(item: LibraryItem): string {
   else if (pct > 0) foot = `<div class="lib-card__bar"><span style="width:${Math.round(pct * 100)}%"></span></div>`;
 
   const sub = subLine(item);
+  const prep = precacheProgress.get(item.id);
+  const prepHtml = prep
+    ? `<div class="lib-prep"><div class="lib-prep__track"><span class="lib-prep__fill" style="width:${prep.total > 0 ? Math.round((prep.received / prep.total) * 100) : 0}%"></span></div><span class="lib-prep__label">Preparing audio</span></div>`
+    : "";
   return `<div class="lib-card" data-id="${escapeHtml(item.id)}" tabindex="0" role="button" title="${escapeHtml(item.title)}">
       <div class="lib-card__cover">
         ${coverInner(item)}
         ${badge ? `<span class="lib-card__badge badge">${badge}</span>` : ""}
         <button class="lib-card__fav${favOn ? " is-on" : ""}" data-fav title="${favOn ? "Remove from favorites" : "Add to favorites"}">${favOn ? icon.starFilled : icon.star}</button>
         <button class="lib-card__more" data-more title="More">${icon.dots}</button>
+        ${prepHtml}
       </div>
       <div class="lib-card__title">${escapeHtml(item.title)}</div>
       <div class="lib-card__sub">${sub ? escapeHtml(sub) : "&nbsp;"}</div>
@@ -484,9 +574,16 @@ function promptDelete(item: LibraryItem): void {
 
 function openItemMenu(item: LibraryItem, x: number, y: number): void {
   const idx = libraryStore.get();
+  const prepareItem: MenuItem = precacheProgress.has(item.id)
+    ? { label: "Cancel preparing", onSelect: () => void ipc.precacheCancel().catch(() => {}) }
+    : {
+        label: `Prepare audio (~${formatBytes(prepareEstimate(item))})`,
+        onSelect: () => void prepareAudio(item),
+      };
   const items: MenuItem[] = [
     { label: "Resume reading", onSelect: () => openItem(item.id) },
     { label: "Play from current position", onSelect: () => openItem(item.id) },
+    prepareItem,
     {
       label: item.favorite ? "Remove from favorites" : "Add to favorites",
       onSelect: () => updateItem(item.id, { favorite: !item.favorite }),
@@ -743,14 +840,52 @@ export function mountLibrary(el: HTMLElement): LibraryView {
   };
   document.addEventListener("keydown", onSlash);
 
+  // Module-level actions (context-menu "Prepare audio") refresh cards through
+  // this. One library view exists at a time, so a single ref is enough.
+  notifyRender = render;
+
+  // Compact now-playing bar (shown only while a book plays in the background).
+  const miniPlayer = mountMiniPlayer(root);
+
+  // Whole-book precache progress → per-card overlay + completion toasts.
+  let disposed = false;
+  let unlistenProgress: (() => void) | null = null;
+  void onDownloadProgress((p) => {
+    const m = /^precache-item-(.+)$/.exec(p.taskId);
+    if (!m) return;
+    const id = m[1]!;
+    if (p.done) {
+      precacheProgress.delete(id);
+      render();
+      if (p.error) {
+        if (p.error !== "Cancelled") toast.error(p.error);
+      } else {
+        const it = getItem(id);
+        toast.info(`Audio ready — ${it?.title ?? "book"}`);
+      }
+      return;
+    }
+    const had = precacheProgress.has(id);
+    precacheProgress.set(id, { received: p.received, total: p.total ?? 0 });
+    if (had) updateCardProgress(id);
+    else render();
+  }).then((un) => {
+    if (disposed) un();
+    else unlistenProgress = un;
+  });
+
   const unsubscribe = libraryStore.subscribe(() => render());
   render();
 
   return {
     dispose() {
+      disposed = true;
       unsubscribe();
       document.removeEventListener("keydown", onSlash);
       closeMenu();
+      unlistenProgress?.();
+      miniPlayer.dispose();
+      notifyRender = () => {};
       root.remove();
     },
   };

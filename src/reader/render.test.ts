@@ -1,11 +1,15 @@
 import { describe, expect, it } from "vitest";
 import type { ContentDoc } from "../core/types";
 import {
+  annotationSegments,
+  blockAnnotationRange,
   blockTag,
   buildCharIndex,
   chapterWordCounts,
   filterByLabel,
   pctForPosition,
+  prepareAudioBytes,
+  prepareAudioSizeLabel,
   sentenceHitForOffset,
   sentenceIndexForOffset,
   splitWordParts,
@@ -224,5 +228,88 @@ describe("blockTag", () => {
     expect(blockTag("blockquote")).toBe("blockquote");
     expect(blockTag("li")).toBe("li");
     expect(blockTag("code")).toBe("pre");
+  });
+});
+
+describe("annotationSegments", () => {
+  type Ann = { id: string; color: string };
+  const a: Ann = { id: "a", color: "yellow" };
+  const b: Ann = { id: "b", color: "green" };
+
+  it("returns a single plain segment when there are no ranges", () => {
+    expect(annotationSegments("Hello world", [])).toEqual([{ text: "Hello world" }]);
+  });
+
+  it("wraps a range and leaves the rest plain", () => {
+    expect(annotationSegments("Hello world", [{ ann: a, startChar: 0, endChar: 5 }])).toEqual([
+      { text: "Hello", ann: a },
+      { text: " world" },
+    ]);
+  });
+
+  it("resolves overlaps last-wins", () => {
+    // "Hello world" (len 11): a[0,5) then b[3,8) → b wins chars 3..7.
+    expect(
+      annotationSegments("Hello world", [
+        { ann: a, startChar: 0, endChar: 5 },
+        { ann: b, startChar: 3, endChar: 8 },
+      ]),
+    ).toEqual([
+      { text: "Hel", ann: a },
+      { text: "lo wo", ann: b },
+      { text: "rld" },
+    ]);
+  });
+
+  it("clamps ranges to the text and preserves the full text", () => {
+    const segs = annotationSegments("Hi", [{ ann: a, startChar: 1, endChar: 40 }]);
+    expect(segs).toEqual([{ text: "H" }, { text: "i", ann: a }]);
+    expect(segs.map((s) => s.text).join("")).toBe("Hi");
+  });
+
+  it("returns [] for empty text", () => {
+    expect(annotationSegments("", [{ ann: a, startChar: 0, endChar: 3 }])).toEqual([]);
+  });
+});
+
+describe("blockAnnotationRange", () => {
+  const ann = { startBlock: 1, startChar: 3, endBlock: 3, endChar: 4 };
+
+  it("returns null for blocks outside the span", () => {
+    expect(blockAnnotationRange(ann, 0, 10)).toBeNull();
+    expect(blockAnnotationRange(ann, 4, 10)).toBeNull();
+  });
+  it("covers startChar → text end on the first block", () => {
+    expect(blockAnnotationRange(ann, 1, 10)).toEqual({ startChar: 3, endChar: 10 });
+  });
+  it("covers a whole middle block", () => {
+    expect(blockAnnotationRange(ann, 2, 8)).toEqual({ startChar: 0, endChar: 8 });
+  });
+  it("covers 0 → endChar on the last block", () => {
+    expect(blockAnnotationRange(ann, 3, 10)).toEqual({ startChar: 0, endChar: 4 });
+  });
+  it("clamps offsets to the block text length", () => {
+    const single = { startBlock: 0, startChar: 2, endBlock: 0, endChar: 99 };
+    expect(blockAnnotationRange(single, 0, 5)).toEqual({ startChar: 2, endChar: 5 });
+  });
+  it("returns null for an empty covered range", () => {
+    expect(blockAnnotationRange({ startBlock: 0, startChar: 4, endBlock: 0, endChar: 4 }, 0, 10)).toBeNull();
+  });
+});
+
+describe("prepareAudioBytes / prepareAudioSizeLabel", () => {
+  it("scales by words, provider rate, and quality", () => {
+    // 155 words @ 155 wpm → 60 s; edge high = 12_000 B/s → 720_000 B.
+    expect(prepareAudioBytes(155, "edge", "high")).toBe(720_000);
+    expect(prepareAudioBytes(155, "edge", "standard")).toBe(360_000);
+  });
+  it("returns 0 for empty or invalid word counts", () => {
+    expect(prepareAudioBytes(0, "edge", "high")).toBe(0);
+    expect(prepareAudioBytes(-5, "edge", "high")).toBe(0);
+    expect(prepareAudioBytes(NaN, "edge", "high")).toBe(0);
+  });
+  it("formats the estimate", () => {
+    expect(prepareAudioSizeLabel(155, "edge", "high")).toBe("720 KB");
+    expect(prepareAudioSizeLabel(0, "edge", "high")).toBe("0 B");
   });
 });

@@ -745,6 +745,33 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* Custom cache-limit input */
+.set-cache-input {
+  width: 108px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.set-cache-unit {
+  font-size: var(--fs-12);
+  color: var(--text-3);
+}
+
+/* Kokoro "installed" footer line */
+.set-kokoro-installed {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 0;
+  font-size: var(--fs-12);
+  color: var(--text-2);
+}
+.set-kokoro-installed svg {
+  width: 13px;
+  height: 13px;
+  color: var(--ok);
+  flex: none;
+}
+
 /* ---------- Modals ---------- */
 .set-modal-msg {
   font-size: var(--fs-13);
