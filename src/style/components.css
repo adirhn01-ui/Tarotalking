@@ -465,3 +465,119 @@ textarea.input {
   margin: var(--sp-1) var(--sp-2);
   background: var(--border);
 }
+
+/* ---------- Audio-job progress chip ---------- */
+/* Floating, expandable indicator for export / prepare-audio jobs. Sits above
+   the reader's 64px player bar (and the home mini-player), bottom-right. */
+.jobs-chip {
+  position: fixed;
+  right: var(--sp-4);
+  bottom: calc(64px + var(--sp-4));
+  z-index: var(--z-overlay);
+  display: flex;
+  flex-direction: column;
+  width: max-content;
+  max-width: 280px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-l);
+  box-shadow: var(--shadow-2);
+  overflow: hidden;
+}
+.jobs-chip__header {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  width: 100%;
+  padding: var(--sp-2) var(--sp-3);
+  border: none;
+  background: transparent;
+  color: var(--text-1);
+  font-family: inherit;
+  font-size: var(--fs-13);
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--dur) var(--ease);
+}
+.jobs-chip__header:hover {
+  background: var(--bg-hover);
+}
+.jobs-chip__ring {
+  flex: none;
+  display: block;
+}
+.jobs-chip__ring-track {
+  stroke: var(--bg-active);
+}
+.jobs-chip__ring-fill {
+  stroke: var(--accent);
+  stroke-linecap: round;
+  transform: rotate(-90deg);
+  transform-origin: center;
+  transition: stroke-dashoffset var(--dur) var(--ease);
+}
+.jobs-chip__label {
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.jobs-chip--error .jobs-chip__label {
+  color: var(--danger);
+}
+.jobs-chip--error .jobs-chip__ring-fill {
+  stroke: var(--danger);
+}
+
+/* Panel — revealed when expanded. visibility (not display) keeps the Cancel
+   button out of the tab order while collapsed. */
+.jobs-chip__panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  max-height: 0;
+  padding: 0 var(--sp-3);
+  opacity: 0;
+  visibility: hidden;
+  overflow: hidden;
+  transition:
+    max-height var(--dur) var(--ease),
+    padding var(--dur) var(--ease),
+    opacity var(--dur) var(--ease),
+    visibility var(--dur);
+}
+.jobs-chip--expanded .jobs-chip__panel {
+  max-height: 220px;
+  padding: 0 var(--sp-3) var(--sp-3);
+  opacity: 1;
+  visibility: visible;
+}
+.jobs-chip__title {
+  max-width: 240px;
+  font-size: var(--fs-12);
+  color: var(--text-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.jobs-chip__bar {
+  height: 3px;
+  border-radius: var(--radius-full);
+  background: var(--bg-active);
+  overflow: hidden;
+}
+.jobs-chip__bar > span {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  border-radius: var(--radius-full);
+  transition: width var(--dur) var(--ease);
+}
+.jobs-chip__eta {
+  font-size: var(--fs-11);
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+.jobs-chip__cancel {
+  align-self: flex-start;
+  margin-top: var(--sp-1);
+}

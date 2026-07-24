@@ -7,6 +7,7 @@ import { initLibrary } from "./core/library";
 import { fileExt } from "./core/format";
 import { IMPORT_EXTENSIONS } from "./core/types";
 import { mountLibrary } from "./library/library";
+import { initJobsChip } from "./ui/jobs";
 
 // Suppress WebView2's native context menu everywhere except editable text
 // fields (which keep native copy/paste). Our own contextmenu handlers still
@@ -77,6 +78,10 @@ async function go(route: Route): Promise<void> {
 }
 
 setNavigator((route) => void go(route));
+
+// App-wide audio-job progress chip: registers its event listener now, renders
+// nothing until an export / prepare-audio job reports progress.
+initJobsChip();
 
 void (async () => {
   await Promise.all([initSettings(), initLibrary()]);
