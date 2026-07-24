@@ -93,6 +93,40 @@ export interface DebugInfo {
 export interface ExportChapterPayload {
   title: string;
   texts: string[];
+  /** The chapter's ORIGINAL 1-based position in the book — never its position
+   *  inside a partial export. The file-name prefix and the ID3 track number come
+   *  from it, so exporting chapters 450-600 writes 0450..0600. Omit it for a
+   *  whole-book payload, where the array position says the same thing. */
+  number?: number;
+  /** The book's full chapter count — the same value on every chapter of one
+   *  export. It rides on the chapters because they are all the audio-job queue
+   *  forwards to this layer. Zero-pad width and the ID3 track total come from
+   *  it, so a slice of a book still numbers like the book it came from. */
+  totalChapters?: number;
+}
+
+/** The numbering an export is written under, resolved from whatever the payload
+ *  carries: every chapter ends up with a real book position, and the book's
+ *  chapter count backs both the zero-padding and the ID3 track total. Pure. */
+export function resolveExportNumbering(
+  chapters: readonly ExportChapterPayload[],
+  requestTotal?: number,
+): { chapters: { title: string; texts: string[]; number: number }[]; totalChapters: number } {
+  const positive = (n: number | undefined): n is number =>
+    typeof n === "number" && Number.isFinite(n) && n >= 1;
+
+  const numbered = chapters.map((c, i) => ({
+    title: c.title,
+    texts: c.texts,
+    number: positive(c.number) ? Math.round(c.number) : i + 1,
+  }));
+
+  let total = positive(requestTotal) ? Math.round(requestTotal) : 0;
+  for (const c of chapters) {
+    if (positive(c.totalChapters)) total = Math.max(total, Math.round(c.totalChapters));
+  }
+  for (const c of numbered) total = Math.max(total, c.number);
+  return { chapters: numbered, totalChapters: Math.max(total, numbered.length, 1) };
 }
 
 export interface ExportAudiobookResult {
@@ -174,10 +208,16 @@ export const ipc = {
     bookTitle: string;
     author: string | null;
     chapters: ExportChapterPayload[];
+    /** The book's full chapter count. Optional here — when it is absent the
+     *  chapters' own numbering supplies it (see resolveExportNumbering). */
+    totalChapters?: number;
     destDir: string;
     taskId: string;
     label: string;
-  }): Promise<ExportAudiobookResult> => call("export_audiobook", { req }),
+  }): Promise<ExportAudiobookResult> =>
+    call("export_audiobook", {
+      req: { ...req, ...resolveExportNumbering(req.chapters, req.totalChapters) },
+    }),
 
   /* ----- kokoro local voices ----- */
   kokoroStatus: (): Promise<KokoroStatus> => call("kokoro_status"),

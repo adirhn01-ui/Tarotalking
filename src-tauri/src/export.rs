@@ -23,6 +23,11 @@ const SILENCE_MS: u64 = 350;
 pub struct ExportChapter {
     pub title: String,
     pub texts: Vec<String>,
+    /// The chapter's 1-based position in the BOOK, not in this export: a
+    /// selection of chapters 450-600 is written as 0450..0600, never renumbered
+    /// from 1. Zero means "not stated" and the position in the request stands in.
+    #[serde(default)]
+    pub number: u32,
 }
 
 #[derive(Deserialize)]
@@ -34,6 +39,10 @@ pub struct ExportRequest {
     pub book_title: String,
     pub author: Option<String>,
     pub chapters: Vec<ExportChapter>,
+    /// The book's full chapter count — what the zero-pad width and the ID3 track
+    /// total describe, so a slice of a 2200-chapter book still pads to 4 digits.
+    #[serde(default)]
+    pub total_chapters: u32,
     pub dest_dir: String,
     pub task_id: String,
     pub label: String,
@@ -170,7 +179,7 @@ fn run_export(
     } else {
         64
     };
-    let width = num_width(chapter_count);
+    let book_total = book_chapter_count(req);
 
     let mut written: u32 = 0;
     for (i, chapter) in req.chapters.iter().enumerate() {
@@ -178,20 +187,14 @@ fn run_export(
             emit(unique + i as u64, true, Some("Cancelled".into()));
             return Err(AppError::msg("Cancelled"));
         }
-        let ordinal = i + 1;
+        // Progress counts the work done in THIS export; the naming below counts
+        // chapters as the book numbers them.
+        let done = unique + i as u64 + 1;
         let has_audio = chapter.texts.iter().any(|t| !t.trim().is_empty());
         if has_audio {
-            // TIT2 uses the raw title (fallback "Chapter N"); the file name uses
-            // a sanitized copy (fallback "Chapter NN", zero-padded).
-            let display_title = if chapter.title.trim().is_empty() {
-                format!("Chapter {ordinal}")
-            } else {
-                chapter.title.clone()
-            };
-            let safe = sanitize(&display_title, &format!("Chapter {ordinal:0width$}"));
-            let file_name = format!("{ordinal:0width$} - {safe}.mp3");
-            let out_path = out_root.join(&file_name);
-            let tmp_path = out_root.join(format!("{file_name}.tmp"));
+            let naming = chapter_naming(chapter.number, i, &chapter.title, book_total);
+            let out_path = out_root.join(&naming.file_name);
+            let tmp_path = out_root.join(format!("{}.tmp", naming.file_name));
 
             let build = build_chapter_mp3(
                 &req.provider,
@@ -205,10 +208,10 @@ fn run_export(
                 std::fs::write(&tmp_path, &bytes)?;
                 write_tags(
                     &tmp_path,
-                    &display_title,
+                    &naming.display_title,
                     req,
-                    ordinal,
-                    chapter_count,
+                    naming.number,
+                    naming.total,
                     cover_bytes.as_deref(),
                 )?;
                 if out_path.exists() {
@@ -230,7 +233,7 @@ fn run_export(
             }
             written += 1;
         }
-        emit(unique + ordinal as u64, false, None);
+        emit(done, false, None);
     }
 
     emit(total, true, None);
@@ -332,6 +335,61 @@ fn silence_samples(rate: u32) -> usize {
 /// Zero-pad width for chapter numbering: enough digits for `count`, min 2.
 fn num_width(count: usize) -> usize {
     count.to_string().len().max(2)
+}
+
+/// The book's chapter count, which the padding width and the ID3 track total
+/// describe. The request states it; a payload that doesn't falls back to the
+/// highest chapter number it carries (and never below the number of chapters
+/// being written), so an unstated total can only ever under-pad, never lie.
+fn book_chapter_count(req: &ExportRequest) -> u32 {
+    let highest = req.chapters.iter().map(|c| c.number).max().unwrap_or(0);
+    req.total_chapters
+        .max(highest)
+        .max(req.chapters.len() as u32)
+        .max(1)
+}
+
+/// The 1-based number a chapter is written under: its own position in the book,
+/// with its position in this export standing in when the payload states none.
+fn chapter_number(raw: u32, index: usize) -> u32 {
+    if raw >= 1 {
+        raw
+    } else {
+        index as u32 + 1
+    }
+}
+
+/// Everything the numbering decides for one exported chapter.
+struct ChapterNaming {
+    /// ID3 track number — the chapter's place in the book.
+    number: u32,
+    /// ID3 track total — the book's chapter count.
+    total: u32,
+    /// TIT2 title: the raw title, or "Chapter N" when it has none.
+    display_title: String,
+    /// Zero-padded number, a dash, and the sanitized title.
+    file_name: String,
+}
+
+/// Name and tag one chapter as the BOOK numbers it. Exporting chapters 450-600
+/// of a 2200-chapter book writes "0450 - Title.mp3" .. "0600 - Title.mp3" with
+/// TRCK 450/2200 .. 600/2200 — the same files a full export would produce.
+fn chapter_naming(raw_number: u32, index: usize, title: &str, book_total: u32) -> ChapterNaming {
+    let number = chapter_number(raw_number, index);
+    let total = book_total.max(number);
+    let width = num_width(total as usize);
+    let display_title = if title.trim().is_empty() {
+        format!("Chapter {number}")
+    } else {
+        title.to_string()
+    };
+    let safe = sanitize(&display_title, &format!("Chapter {number:0width$}"));
+    ChapterNaming {
+        number,
+        total,
+        display_title,
+        file_name: format!("{number:0width$} - {safe}.mp3"),
+    }
 }
 
 /// Decoded 16-bit PCM WAV, downmixed to mono.
@@ -460,8 +518,8 @@ fn write_tags(
     path: &Path,
     title: &str,
     req: &ExportRequest,
-    track: usize,
-    total_tracks: usize,
+    track: u32,
+    total_tracks: u32,
     cover: Option<&[u8]>,
 ) -> Result<()> {
     use id3::frame::{Picture, PictureType};
@@ -475,8 +533,8 @@ fn write_tags(
             tag.set_artist(author);
         }
     }
-    tag.set_track(track as u32);
-    tag.set_total_tracks(total_tracks as u32);
+    tag.set_track(track);
+    tag.set_total_tracks(total_tracks);
     tag.set_genre("Audiobook");
     if let Some(bytes) = cover {
         tag.add_frame(Frame::with_content(
@@ -584,6 +642,119 @@ mod tests {
         assert_eq!(format!("{:0w$}", 3, w = w), "03");
         let w = num_width(120);
         assert_eq!(format!("{:0w$}", 7, w = w), "007");
+    }
+
+    // ---- chapter numbering -------------------------------------------------
+
+    fn req_with(chapters: Vec<ExportChapter>, total_chapters: u32) -> ExportRequest {
+        ExportRequest {
+            item_id: "item".into(),
+            provider: "edge".into(),
+            voice_id: "voice".into(),
+            book_title: "The Book".into(),
+            author: None,
+            chapters,
+            total_chapters,
+            dest_dir: "C:\\out".into(),
+            task_id: "job-1".into(),
+            label: "The Book".into(),
+        }
+    }
+
+    fn chapter(number: u32, title: &str) -> ExportChapter {
+        ExportChapter {
+            title: title.into(),
+            texts: vec!["Some text.".into()],
+            number,
+        }
+    }
+
+    #[test]
+    fn book_chapter_count_comes_from_the_request() {
+        // A 151-chapter slice of a 2200-chapter book still describes the book.
+        let chapters = (450..=600).map(|n| chapter(n, "T")).collect();
+        assert_eq!(book_chapter_count(&req_with(chapters, 2200)), 2200);
+    }
+
+    #[test]
+    fn book_chapter_count_falls_back_to_the_payload() {
+        // No stated total: the highest exported number is the best available
+        // floor, and the count of chapters is never undercut.
+        let chapters = vec![chapter(450, "a"), chapter(600, "b")];
+        assert_eq!(book_chapter_count(&req_with(chapters, 0)), 600);
+
+        let unnumbered = vec![chapter(0, "a"), chapter(0, "b"), chapter(0, "c")];
+        assert_eq!(book_chapter_count(&req_with(unnumbered, 0)), 3);
+
+        assert_eq!(book_chapter_count(&req_with(Vec::new(), 0)), 1);
+    }
+
+    #[test]
+    fn chapter_number_prefers_the_books_position() {
+        assert_eq!(chapter_number(450, 0), 450);
+        assert_eq!(chapter_number(1, 7), 1);
+        // Unstated (0): the position within this export stands in.
+        assert_eq!(chapter_number(0, 0), 1);
+        assert_eq!(chapter_number(0, 6), 7);
+    }
+
+    #[test]
+    fn partial_export_keeps_the_books_numbers_and_width() {
+        // Chapters 450-452 of a 2200-chapter book: 4-digit padding, original
+        // numbers, and a track total describing the whole book.
+        let total = book_chapter_count(&req_with(
+            vec![
+                chapter(450, "The Gate"),
+                chapter(451, "The Road"),
+                chapter(452, "The Gate!"),
+            ],
+            2200,
+        ));
+        assert_eq!(total, 2200);
+
+        let a = chapter_naming(450, 0, "The Gate", total);
+        assert_eq!(a.file_name, "0450 - The Gate.mp3");
+        assert_eq!((a.number, a.total), (450, 2200));
+
+        let b = chapter_naming(451, 1, "The Road", total);
+        assert_eq!(b.file_name, "0451 - The Road.mp3");
+        assert_eq!((b.number, b.total), (451, 2200));
+
+        // The sanitizer still governs the title part of the name.
+        let c = chapter_naming(452, 2, "The Gate!", total);
+        assert_eq!(c.file_name, "0452 - The Gate.mp3");
+    }
+
+    #[test]
+    fn whole_book_export_numbers_from_one() {
+        let total = book_chapter_count(&req_with(
+            vec![chapter(1, "One"), chapter(2, "Two")],
+            2,
+        ));
+        assert_eq!(total, 2);
+        assert_eq!(chapter_naming(1, 0, "One", total).file_name, "01 - One.mp3");
+        assert_eq!(chapter_naming(2, 1, "Two", total).file_name, "02 - Two.mp3");
+    }
+
+    #[test]
+    fn chapter_naming_titles_an_untitled_chapter_by_its_book_number() {
+        let n = chapter_naming(450, 0, "   ", 2200);
+        assert_eq!(n.display_title, "Chapter 450");
+        assert_eq!(n.file_name, "0450 - Chapter 450.mp3");
+
+        // A title made only of stripped characters falls back to the padded form.
+        let n = chapter_naming(7, 0, "***", 120);
+        assert_eq!(n.display_title, "***");
+        assert_eq!(n.file_name, "007 - Chapter 007.mp3");
+    }
+
+    #[test]
+    fn chapter_naming_never_pads_narrower_than_its_own_number() {
+        // A number beyond the stated total widens the field rather than losing a
+        // digit, so the file name always spells the chapter out in full.
+        let n = chapter_naming(1200, 0, "Late", 12);
+        assert_eq!(n.total, 1200);
+        assert_eq!(n.file_name, "1200 - Late.mp3");
     }
 
     // ---- silence sample math ----------------------------------------------

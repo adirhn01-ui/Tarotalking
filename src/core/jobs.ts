@@ -41,7 +41,11 @@ export interface ExportSpec {
   provider: ProviderId;
   voiceId: string;
   author: string | null;
-  chapters: { title: string; texts: string[] }[];
+  /** `number` is the chapter's 1-based position in the BOOK, so a partial
+   *  export keeps its real chapter numbers instead of renumbering from 1. */
+  chapters: { title: string; texts: string[]; number?: number }[];
+  /** The book's full chapter count, for zero-padding and ID3 track totals. */
+  totalChapters?: number;
   destDir: string;
   scope?: string;
 }
@@ -333,6 +337,7 @@ async function run(e: Entry): Promise<void> {
         bookTitle: e.title,
         author: spec.author,
         chapters: spec.chapters,
+        totalChapters: spec.totalChapters,
         destDir: spec.destDir,
         taskId,
         label: e.title,

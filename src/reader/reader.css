@@ -8,6 +8,10 @@
   min-height: 0;
   overflow: hidden;
   background: var(--page-bg);
+  /* The top bar and player bar are absolute overlays; anything that scrolls
+     underneath them has to account for their heights. */
+  --reader-top-h: 52px;
+  --reader-bottom-h: 64px;
 }
 
 /* ---------- body: TOC drawer + scrolling page ---------- */
@@ -25,8 +29,8 @@
   overflow-y: auto;
   overflow-x: hidden;
   background: var(--page-bg);
-  padding-top: 52px;
-  padding-bottom: 64px;
+  padding-top: var(--reader-top-h);
+  padding-bottom: var(--reader-bottom-h);
 }
 
 .reader-surface {
@@ -319,10 +323,19 @@
 }
 .reader-toc__inner {
   width: 280px;
-  height: 100%;
+  /* Inset the scrollport itself so rows clip exactly at the chrome edges and
+     the scrollbar runs only through the visible region. */
+  height: calc(100% - var(--reader-top-h) - var(--reader-bottom-h));
+  margin-top: var(--reader-top-h);
+  margin-bottom: var(--reader-bottom-h);
   overflow-y: auto;
-  padding-top: 52px;
-  padding-bottom: 64px;
+  overscroll-behavior: contain;
+}
+/* Focus mode hides both bars, so the panel can use the full height. */
+.reader--focus .reader-toc__inner {
+  height: 100%;
+  margin-top: 0;
+  margin-bottom: 0;
 }
 
 .toc {
@@ -334,6 +347,10 @@
   display: flex;
   gap: var(--sp-2);
   padding: var(--sp-3) var(--sp-3) var(--sp-2);
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--bg-panel);
 }
 .toc__tab {
   flex: 1;

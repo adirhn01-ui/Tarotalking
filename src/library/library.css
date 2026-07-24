@@ -493,6 +493,83 @@
   min-height: 220px;
   font-family: var(--font-ui);
 }
+
+/* ---------- export: chapter selection ---------- */
+/* Each of these is a flex container, so the UA's [hidden] rule loses to the
+   class. Restore it once, for every part of the chapter picker. */
+.exp-range[hidden],
+.exp-pick[hidden],
+.exp-row[hidden] {
+  display: none;
+}
+.exp-range {
+  display: flex;
+  gap: var(--sp-3);
+}
+.exp-range__field {
+  flex: none;
+}
+.exp-range__num {
+  width: 96px;
+  font-variant-numeric: tabular-nums;
+}
+.exp-pick {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+.exp-pick__bar {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+.exp-pick__filter {
+  flex: 1;
+  min-width: 0;
+}
+.exp-pick__list {
+  max-height: 240px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-s);
+  background: var(--bg-input);
+  padding: var(--sp-1);
+}
+.exp-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-1) var(--sp-2);
+  border-radius: var(--radius-s);
+  font-size: var(--fs-13);
+  cursor: pointer;
+  /* Thousands of rows: skip the layout of the ones scrolled out of view. */
+  content-visibility: auto;
+  contain-intrinsic-size: auto 28px;
+}
+.exp-row:hover {
+  background: var(--bg-hover);
+}
+.exp-row__box {
+  flex: none;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.exp-row__num {
+  flex: none;
+  min-width: 4ch;
+  text-align: right;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+.exp-row__title {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
 .lib__add.is-busy,
 .btn.is-busy {
   pointer-events: none;

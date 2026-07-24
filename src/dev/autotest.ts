@@ -350,18 +350,31 @@ export async function runAutotest(): Promise<void> {
       assert(voices.length > 0, "no system voices");
       const voiceId = voices[0]!.id;
 
-      // Build a ONE-chapter payload from the fixture's first chapter, with the
-      // exact same segmentation the player/precache path uses.
+      // Build a ONE-chapter payload with the exact same segmentation the
+      // player/precache path uses. The LAST chapter that holds text is the
+      // telling one: exported on its own it must still be named and tagged by
+      // its place in the BOOK, not by its position in the payload.
       const doc = await loadDoc(epubId);
-      const ch = doc.chapters[0]!;
-      const texts: string[] = [];
-      for (const b of ch.blocks) {
-        if (b.t === "img" || b.t === "hr") continue;
-        if (typeof b.text !== "string" || b.text.trim().length === 0) continue;
-        for (const s of splitSentences(b.text)) texts.push(s.text);
+      let number = 0;
+      let title = "";
+      let texts: string[] = [];
+      for (let i = 0; i < doc.chapters.length; i++) {
+        const ch = doc.chapters[i]!;
+        const found: string[] = [];
+        for (const b of ch.blocks) {
+          if (b.t === "img" || b.t === "hr") continue;
+          if (typeof b.text !== "string" || b.text.trim().length === 0) continue;
+          for (const s of splitSentences(b.text)) found.push(s.text);
+        }
+        if (found.length === 0) continue;
+        number = i + 1;
+        title = ch.title && ch.title.trim() ? ch.title : `Chapter ${i + 1}`;
+        texts = found;
       }
-      assert(texts.length > 0, "first chapter has no speakable sentences");
-      const title = ch.title && ch.title.trim() ? ch.title : "Chapter 1";
+      assert(texts.length > 0, "no chapter has speakable sentences");
+      const totalChapters = doc.chapters.length;
+      // The book's chapter count sets the padding width, not the export's.
+      const prefix = String(number).padStart(Math.max(2, String(totalChapters).length), "0");
       const destDir = `${info.fixturesDir}\\export-e2e-${Date.now()}`;
 
       // Bound the call so a backend hang fails this block meaningfully instead
@@ -373,7 +386,8 @@ export async function runAutotest(): Promise<void> {
           voiceId,
           bookTitle: "The Fixture Book",
           author: null,
-          chapters: [{ title, texts }],
+          chapters: [{ title, texts, number }],
+          totalChapters,
           destDir,
           taskId: `export-item-${epubId}`,
           label: "The Fixture Book",
@@ -387,18 +401,14 @@ export async function runAutotest(): Promise<void> {
       assert(result.chaptersWritten === 1, `chaptersWritten: ${result.chaptersWritten}`);
 
       // The frozen IPC surface has no directory listing, so locate the single
-      // written file by its (index-prefixed, title-based) name and read it with
+      // written file by its (book-numbered, title-based) name and read it with
       // readFileBytes, which works on any path. chaptersWritten === 1 stands in
-      // for "exactly one file".
+      // for "exactly one file". The first candidate is the numbering this
+      // export must produce; the rest only sharpen the failure message.
       const candidates = [
-        `${result.dir}\\01 - ${title}.mp3`,
-        `${result.dir}\\01 ${title}.mp3`,
-        `${result.dir}\\01. ${title}.mp3`,
-        `${result.dir}\\1 - ${title}.mp3`,
-        `${result.dir}\\001 - ${title}.mp3`,
-        `${result.dir}\\${title}.mp3`,
-        `${result.dir}\\Chapter 1.mp3`,
-        `${result.dir}\\01.mp3`,
+        `${result.dir}\\${prefix} - ${title}.mp3`,
+        `${result.dir}\\${prefix} ${title}.mp3`,
+        `${result.dir}\\${prefix} - Chapter ${number}.mp3`,
       ];
       let bytes: Uint8Array | null = null;
       let readPath = "";

@@ -45,7 +45,11 @@ import { trapTab } from "../ui/focus";
 import { icon } from "../ui/icons";
 import { closeMenu, showMenu, type MenuItem } from "../ui/menu";
 import { toast } from "../ui/toast";
-import { openExportDialog, type ExportChoice } from "./export-dialog";
+import {
+  openExportDialog,
+  type ExportChapterSummary,
+  type ExportChoice,
+} from "./export-dialog";
 import { mountMiniPlayer } from "./mini-player";
 
 export interface LibraryView {
@@ -156,12 +160,46 @@ async function prepareAudio(item: LibraryItem): Promise<void> {
 
 /* ================= export audiobook ================= */
 
-/** One ExportChapterPayload per non-empty chapter. Segmentation mirrors the
- *  player/precache path EXACTLY (same splitSentences over the same speakable
- *  blocks) so exported sentences hit the same cache entries. */
-function buildExportChapters(doc: ContentDoc): ExportChapterPayload[] {
+/** The rows the export dialog lists: each chapter's real 1-based place in the
+ *  book, its title, and how much speakable text it holds (the dialog splits the
+ *  book's word count by that share for its size estimate). Chapters with no
+ *  speakable text are left out — there is nothing to export in them. Cheap by
+ *  design: block lengths only, no sentence segmentation. */
+export function buildChapterSummaries(doc: ContentDoc): ExportChapterSummary[] {
+  const out: ExportChapterSummary[] = [];
+  doc.chapters.forEach((ch, i) => {
+    let chars = 0;
+    for (const b of ch.blocks) {
+      if (b.t === "img" || b.t === "hr") continue;
+      if (typeof b.text !== "string") continue;
+      chars += b.text.trim().length;
+    }
+    if (chars === 0) return;
+    out.push({
+      number: i + 1,
+      title: ch.title && ch.title.trim() ? ch.title : `Chapter ${i + 1}`,
+      chars,
+    });
+  });
+  return out;
+}
+
+/** One ExportChapterPayload per selected non-empty chapter. Every payload
+ *  carries the chapter's position in the BOOK (not in the filtered array, which
+ *  skips empty chapters) plus the book's chapter count, so a partial export is
+ *  numbered and tagged exactly as the same chapters would be in a full one.
+ *  Segmentation mirrors the player/precache path EXACTLY (same splitSentences
+ *  over the same speakable blocks) so exported sentences hit the same cache
+ *  entries. */
+export function buildExportChapters(
+  doc: ContentDoc,
+  selected: ReadonlySet<number>,
+): ExportChapterPayload[] {
+  const totalChapters = doc.chapters.length;
   const out: ExportChapterPayload[] = [];
   doc.chapters.forEach((ch, i) => {
+    const number = i + 1;
+    if (!selected.has(number)) return;
     const texts: string[] = [];
     for (const b of ch.blocks) {
       if (b.t === "img" || b.t === "hr") continue;
@@ -169,20 +207,28 @@ function buildExportChapters(doc: ContentDoc): ExportChapterPayload[] {
       for (const s of splitSentences(b.text)) texts.push(s.text);
     }
     if (texts.length === 0) return; // skip empty chapters
-    out.push({ title: ch.title && ch.title.trim() ? ch.title : `Chapter ${i + 1}`, texts });
+    out.push({
+      title: ch.title && ch.title.trim() ? ch.title : `Chapter ${number}`,
+      texts,
+      number,
+      totalChapters,
+    });
   });
   return out;
 }
 
-async function startExport(item: LibraryItem, choice: ExportChoice): Promise<void> {
-  let doc: ContentDoc;
-  try {
-    doc = await loadDoc(item.id);
-  } catch (e) {
-    toast.error(describeError(e));
-    return;
-  }
-  const chapters = buildExportChapters(doc);
+/** Distinguishes partial exports of one book so a second selection queues
+ *  alongside the first instead of deduping into it. A whole book keeps the
+ *  scope-less identity it has always had. */
+function exportScope(chapters: ExportChapterPayload[], bookChapters: number): string | undefined {
+  if (chapters.length === bookChapters) return undefined;
+  const first = chapters[0]?.number ?? 0;
+  const last = chapters[chapters.length - 1]?.number ?? 0;
+  return `ch-${first}-${last}-${chapters.length}`;
+}
+
+function startExport(item: LibraryItem, doc: ContentDoc, choice: ExportChoice): void {
+  const chapters = buildExportChapters(doc, new Set(choice.chapters));
   if (chapters.length === 0) {
     toast.error("This item has no readable text to export");
     return;
@@ -196,12 +242,35 @@ async function startExport(item: LibraryItem, choice: ExportChoice): Promise<voi
     voiceId: choice.voice.id,
     author: item.author ?? null,
     chapters,
+    totalChapters: doc.chapters.length,
     destDir: choice.destDir,
+    scope: exportScope(chapters, doc.chapters.length),
   });
 }
 
 function openExport(item: LibraryItem): void {
-  openExportDialog({ item, onExport: (choice) => void startExport(item, choice) });
+  void (async () => {
+    let doc: ContentDoc;
+    try {
+      doc = await loadDoc(item.id);
+    } catch (e) {
+      toast.error(describeError(e));
+      return;
+    }
+    // The dialog needs chapter titles, so the doc is read once here and kept for
+    // the export itself — picking chapters never costs a second parse.
+    const chapters = buildChapterSummaries(doc);
+    if (chapters.length === 0) {
+      toast.error("This item has no readable text to export");
+      return;
+    }
+    openExportDialog({
+      item,
+      chapters,
+      totalChapters: doc.chapters.length,
+      onExport: (choice) => startExport(item, doc, choice),
+    });
+  })();
 }
 
 /* ================= pure card helpers ================= */
