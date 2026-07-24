@@ -282,6 +282,66 @@ export async function runAutotest(): Promise<void> {
       );
     });
 
+    await test("activity-page", async () => {
+      assert(epubId, "no epub imported");
+      const { enqueue, cancelJob, jobsStore, clearFinished } = await import("../core/jobs");
+
+      // Empty first: the page must teach rather than render a blank screen.
+      clearFinished();
+      navigate({ view: "activity" });
+      await waitFor(
+        () => !!document.querySelector(".act") && !!document.querySelector(".empty-state"),
+        6000,
+        "activity page with its empty state",
+      );
+
+      // A real queued job must render a real row for this book.
+      const item = getItem(epubId)!;
+      const jobId = enqueue({
+        kind: "prepare",
+        itemId: epubId,
+        title: item.title,
+        cover: item.cover,
+        scope: "e2e",
+        provider: "system",
+        voiceId: "e2e-not-a-real-voice",
+        texts: ["Activity page verification sentence."],
+      });
+      await waitFor(
+        () => !!document.querySelector(`[data-job-id="${jobId}"]`),
+        6000,
+        "a row for the queued job",
+      );
+      const row = document.querySelector<HTMLElement>(`[data-job-id="${jobId}"]`)!;
+      const shown = row.textContent ?? "";
+      assert(shown.includes(item.title), `row is missing the book title: ${shown.slice(0, 120)}`);
+      // A one-sentence job can finish before this runs, so any legitimate
+      // action line counts — what matters is that the row states its state.
+      assert(
+        /Preparing audio|Queued|Audio ready|Cancelled|Failed/.test(shown),
+        `row is missing its action line: ${shown.slice(0, 120)}`,
+      );
+      assert(
+        getComputedStyle(row).display !== "none" && row.getBoundingClientRect().height > 20,
+        "row rendered but is not actually visible",
+      );
+
+      // Cancelling must clear it out of "in progress" rather than stranding it.
+      cancelJob(jobId);
+      await waitFor(
+        () => {
+          const j = jobsStore.get().jobs.find((x) => x.id === jobId);
+          return !!j && j.status !== "running" && j.status !== "queued";
+        },
+        8000,
+        "job leaves the in-progress list",
+      );
+      const settled = jobsStore.get().jobs.find((x) => x.id === jobId)!;
+      clearFinished();
+      navigate({ view: "library" });
+      return `row rendered and settled as ${settled.status}`;
+    });
+
     await test("export-audiobook", async () => {
       assert(epubId, "no epub imported");
       const avail = await getProvider("system").availability();

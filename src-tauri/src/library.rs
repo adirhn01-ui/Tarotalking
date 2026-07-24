@@ -11,16 +11,19 @@ const MISSING_DOC: &str = "This item's content is missing — try importing it a
 #[tauri::command]
 pub fn library_load() -> Result<Option<Value>> {
     let path = paths::library_index_path();
-    let text = match fs::read_to_string(&path) {
-        Ok(t) => t,
+    // Read bytes, not a String: serde_json validates the UTF-8 it needs while
+    // parsing, so decoding the whole file up front is a wasted extra pass.
+    let bytes = match fs::read(&path) {
+        Ok(b) => b,
         // Missing (or otherwise unreadable) index → treat as an empty library.
         Err(_) => return Ok(None),
     };
-    match serde_json::from_str::<Value>(&text) {
+    match serde_json::from_slice::<Value>(&bytes) {
         Ok(v) => Ok(Some(v)),
         Err(_) => {
-            // Corrupt JSON: back it up before anything can overwrite it, so the
-            // user's library metadata is never silently lost.
+            // Corrupt JSON (or bytes that are not JSON at all): back it up
+            // before anything can overwrite it, so the user's library metadata
+            // is never silently lost.
             let bak = path.with_extension("json.bak");
             let _ = fs::rename(&path, &bak);
             Ok(None)
@@ -44,8 +47,10 @@ pub fn item_write_doc(id: String, doc: Value) -> Result<()> {
 #[tauri::command]
 pub fn item_read_doc(id: String) -> Result<Value> {
     let path = paths::item_dir(&id)?.join("doc.json");
-    let text = fs::read_to_string(&path).map_err(|_| AppError::msg(MISSING_DOC))?;
-    serde_json::from_str(&text).map_err(|_| AppError::msg(MISSING_DOC))
+    // A book's doc.json runs to megabytes; parse the bytes directly rather than
+    // walking the whole buffer once more to build an intermediate String.
+    let bytes = fs::read(&path).map_err(|_| AppError::msg(MISSING_DOC))?;
+    serde_json::from_slice(&bytes).map_err(|_| AppError::msg(MISSING_DOC))
 }
 
 #[tauri::command]
@@ -117,6 +122,13 @@ mod tests {
         std::fs::write(&path, b"{ this is not valid json ").unwrap();
 
         // Load returns None and leaves a .bak behind (original never overwritten).
+        assert!(library_load().unwrap().is_none());
+        assert!(path.with_extension("json.bak").exists());
+        assert!(!path.exists());
+
+        // Bytes that are not even valid UTF-8 are corruption too, and get the
+        // same rescue rather than being silently treated as an empty library.
+        std::fs::write(&path, [0xffu8, 0xfe, 0x00, 0x7b]).unwrap();
         assert!(library_load().unwrap().is_none());
         assert!(path.with_extension("json.bak").exists());
         assert!(!path.exists());

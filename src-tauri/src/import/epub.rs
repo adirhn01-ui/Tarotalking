@@ -8,7 +8,8 @@ use crate::paths;
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::reader::Reader;
 use serde::Serialize;
-use std::collections::HashMap;
+use std::cell::OnceCell;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufReader, Read, Seek};
 use std::path::Path;
@@ -16,6 +17,9 @@ use zip::ZipArchive;
 
 const MAX_EPUB: u64 = 400 * 1024 * 1024;
 const MAX_IMAGE: u64 = 20 * 1024 * 1024;
+/// Upper bound on the buffer reserved from an entry's declared size, so a bogus
+/// zip header cannot make us allocate wildly before the read even starts.
+const READ_RESERVE_CAP: u64 = 8 * 1024 * 1024;
 const NOT_EPUB: &str = "Not a valid EPUB file";
 
 #[derive(Serialize)]
@@ -78,6 +82,7 @@ fn import_epub_blocking(id: &str, path: &str) -> Result<EpubImportResult> {
     let mut archive =
         ZipArchive::new(BufReader::new(file)).map_err(|_| AppError::msg(NOT_EPUB))?;
     let names: Vec<String> = archive.file_names().map(str::to_string).collect();
+    let names = NameIndex::new(&names);
 
     // container.xml → OPF path.
     let container =
@@ -98,25 +103,25 @@ fn import_epub_blocking(id: &str, path: &str) -> Result<EpubImportResult> {
     let toc_map = build_toc(&mut archive, &names, &opf);
 
     // Chapters in spine order.
-    let mut chapters: Vec<EpubChapterRaw> = Vec::new();
+    let mut chapters: Vec<EpubChapterRaw> = Vec::with_capacity(opf.spine.len());
     for idref in &opf.spine {
         let Some(&idx) = id_map.get(idref.as_str()) else {
             continue;
         };
-        let (zip_path, media_type) = {
-            let it = &opf.manifest[idx];
-            (it.zip_path.clone(), it.media_type.clone())
-        };
-        if !is_html(&media_type) {
+        let item = &opf.manifest[idx];
+        if !is_html(&item.media_type) {
             continue;
         }
-        let Some(bytes) = read_named(&mut archive, &names, &zip_path) else {
+        let Some(bytes) = read_named(&mut archive, &names, &item.zip_path) else {
             continue; // missing spine file: skip gracefully
         };
-        let html = String::from_utf8_lossy(&bytes).into_owned();
-        let title = toc_map.get(&zip_path).cloned();
+        // Chapter XHTML is UTF-8 in practice; take the buffer over as-is and
+        // let only genuinely broken bytes pay for a lossy copy.
+        let html = String::from_utf8(bytes)
+            .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned());
+        let title = toc_map.get(&item.zip_path).cloned();
         chapters.push(EpubChapterRaw {
-            href: zip_path,
+            href: item.zip_path.clone(),
             title,
             html,
         });
@@ -128,29 +133,35 @@ fn import_epub_blocking(id: &str, path: &str) -> Result<EpubImportResult> {
     // Extract images.
     paths::ensure_dir(&item_dir)?;
     let images_dir = item_dir.join("images");
+    // Created on the first image that reaches the write, so a book without any
+    // gets no empty dir — and a book with 300 gets one create_dir_all, not 300.
+    let mut images_dir_ready = false;
     let mut images: HashMap<String, String> = HashMap::new();
     for m in &opf.manifest {
         if !m.media_type.starts_with("image/") {
             continue;
         }
-        let Some(actual) = find_name(&names, &m.zip_path) else {
+        let Some(actual) = names.find(&m.zip_path) else {
             continue;
         };
         let data = {
-            let mut f = match archive.by_name(&actual) {
+            let mut f = match archive.by_name(actual) {
                 Ok(f) => f,
                 Err(_) => continue,
             };
-            if f.size() > MAX_IMAGE {
+            let declared = f.size();
+            if declared > MAX_IMAGE {
                 continue; // skip oversized images
             }
-            let mut v = Vec::new();
-            if f.read_to_end(&mut v).is_err() {
-                continue;
+            match read_entry(&mut f, declared) {
+                Some(v) => v,
+                None => continue,
             }
-            v
         };
-        paths::ensure_dir(&images_dir)?;
+        if !images_dir_ready {
+            paths::ensure_dir(&images_dir)?;
+            images_dir_ready = true;
+        }
         let out = images_dir.join(flat_name(&m.zip_path));
         if std::fs::write(&out, &data).is_err() {
             continue;
@@ -173,7 +184,7 @@ fn import_epub_blocking(id: &str, path: &str) -> Result<EpubImportResult> {
 
 fn extract_cover<R: Read + Seek>(
     archive: &mut ZipArchive<R>,
-    names: &[String],
+    names: &NameIndex,
     opf: &Opf,
     item_dir: &Path,
     images: &mut HashMap<String, String>,
@@ -190,15 +201,14 @@ fn extract_cover<R: Read + Seek>(
                 .and_then(|cid| opf.manifest.iter().find(|m| &m.id == cid))
         })?;
 
-    let actual = find_name(names, &cover.zip_path)?;
+    let actual = names.find(&cover.zip_path)?;
     let data = {
-        let mut f = archive.by_name(&actual).ok()?;
-        if f.size() > MAX_IMAGE {
+        let mut f = archive.by_name(actual).ok()?;
+        let declared = f.size();
+        if declared > MAX_IMAGE {
             return None;
         }
-        let mut v = Vec::new();
-        f.read_to_end(&mut v).ok()?;
-        v
+        read_entry(&mut f, declared)?
     };
 
     let ext = match ext_of(&cover.zip_path) {
@@ -216,33 +226,69 @@ fn extract_cover<R: Read + Seek>(
 
 /* ============================ zip helpers ============================ */
 
-/// Resolve a target zip path to an actual entry name (exact, else
-/// case-insensitive) and read it fully.
-fn read_named<R: Read + Seek>(
-    archive: &mut ZipArchive<R>,
-    names: &[String],
-    target: &str,
-) -> Option<Vec<u8>> {
-    let actual = find_name(names, target)?;
-    let mut f = archive.by_name(&actual).ok()?;
-    let mut v = Vec::new();
+/// Entry-name lookup for the archive. A book resolves one name per chapter,
+/// image, OPF and TOC entry, so scanning the whole name list per lookup is
+/// quadratic on exactly the books that are already slowest to import. The
+/// case-insensitive fallback map is built only if some href actually needs it —
+/// well-formed EPUBs match exactly and never pay for it.
+struct NameIndex<'a> {
+    names: &'a [String],
+    exact: HashSet<&'a str>,
+    lower: OnceCell<HashMap<String, &'a str>>,
+}
+
+impl<'a> NameIndex<'a> {
+    fn new(names: &'a [String]) -> Self {
+        NameIndex {
+            names,
+            exact: names.iter().map(String::as_str).collect(),
+            lower: OnceCell::new(),
+        }
+    }
+
+    /// Resolve a target zip path to the archive's actual entry name.
+    fn find(&self, target: &str) -> Option<&'a str> {
+        if let Some(n) = self.exact.get(target) {
+            return Some(n);
+        }
+        let lower = self.lower.get_or_init(|| {
+            let mut map: HashMap<String, &'a str> = HashMap::with_capacity(self.names.len());
+            for n in self.names {
+                // First entry wins, matching the old first-match scan.
+                map.entry(n.to_lowercase()).or_insert(n.as_str());
+            }
+            map
+        });
+        lower.get(&target.to_lowercase()).copied()
+    }
+}
+
+/// Read an archive entry fully, reserving its declared size up front instead of
+/// growing a buffer from empty (a 500 KB chapter costs a dozen reallocations
+/// and copies otherwise).
+fn read_entry(f: &mut impl Read, declared: u64) -> Option<Vec<u8>> {
+    let mut v = Vec::with_capacity(declared.min(READ_RESERVE_CAP) as usize);
     f.read_to_end(&mut v).ok()?;
     Some(v)
 }
 
-fn find_name(names: &[String], target: &str) -> Option<String> {
-    if names.iter().any(|n| n == target) {
-        return Some(target.to_string());
-    }
-    let tl = target.to_lowercase();
-    names.iter().find(|n| n.to_lowercase() == tl).cloned()
+/// Resolve a target zip path to an actual entry name and read it fully.
+fn read_named<R: Read + Seek>(
+    archive: &mut ZipArchive<R>,
+    names: &NameIndex,
+    target: &str,
+) -> Option<Vec<u8>> {
+    let actual = names.find(target)?;
+    let mut f = archive.by_name(actual).ok()?;
+    let declared = f.size();
+    read_entry(&mut f, declared)
 }
 
 /* ============================ TOC ============================ */
 
 fn build_toc<R: Read + Seek>(
     archive: &mut ZipArchive<R>,
-    names: &[String],
+    names: &NameIndex,
     opf: &Opf,
 ) -> HashMap<String, String> {
     // EPUB3 nav document (manifest item with the "nav" property).
@@ -876,6 +922,35 @@ mod tests {
         assert_eq!(err.to_string(), "Not a valid EPUB file");
 
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn name_lookup_prefers_exact_then_falls_back_to_case() {
+        let names: Vec<String> = ["OEBPS/Chapter1.xhtml", "OEBPS/chapter1.xhtml", "OEBPS/Cover.PNG"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let idx = NameIndex::new(&names);
+
+        // Exact match wins even when a case-variant sibling exists.
+        assert_eq!(idx.find("OEBPS/chapter1.xhtml"), Some("OEBPS/chapter1.xhtml"));
+        assert_eq!(idx.find("OEBPS/Chapter1.xhtml"), Some("OEBPS/Chapter1.xhtml"));
+        // No exact match: case-insensitive fallback, first entry in zip order.
+        assert_eq!(idx.find("oebps/CHAPTER1.xhtml"), Some("OEBPS/Chapter1.xhtml"));
+        assert_eq!(idx.find("OEBPS/cover.png"), Some("OEBPS/Cover.PNG"));
+        // Genuinely absent stays absent.
+        assert_eq!(idx.find("OEBPS/missing.xhtml"), None);
+    }
+
+    #[test]
+    fn entry_reads_are_capped_but_complete() {
+        // A lying size header must not drive the allocation, and the data read
+        // is whatever the reader actually yields.
+        let data = vec![7u8; 100];
+        let got = read_entry(&mut Cursor::new(data.clone()), u64::MAX).unwrap();
+        assert_eq!(got, data);
+        let got = read_entry(&mut Cursor::new(data.clone()), 0).unwrap();
+        assert_eq!(got, data, "an under-declared entry still reads to the end");
     }
 
     #[test]

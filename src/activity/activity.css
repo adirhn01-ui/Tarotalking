@@ -1,0 +1,239 @@
+/* Activity view styles
+   A full page of job rows: cover on the left, status and metrics on the right.
+   Tokens only, so it reads as the same product in both themes. */
+
+/* ---------- Shell ---------- */
+.act {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-app);
+}
+
+/* Sections and the empty state are flex containers, so the UA's [hidden] rule
+   loses to their class. Restore it once, for everything inside the page. */
+.act [hidden] {
+  display: none;
+}
+
+.act__topbar {
+  flex: none;
+  height: 52px;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: 0 var(--sp-4);
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-panel);
+}
+.act__topbar-title {
+  font-size: var(--fs-14);
+  font-weight: 600;
+}
+.act__spacer {
+  flex: 1;
+}
+
+.act__body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+.act__inner {
+  max-width: 720px;
+  margin: 0 auto;
+  padding: var(--sp-8);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-6);
+}
+
+.act__section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+.act__section-head {
+  font-size: var(--fs-12);
+  font-weight: 600;
+  color: var(--text-2);
+  padding-left: 2px;
+}
+.act__list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+
+/* ---------- Empty state ---------- */
+.act__empty-title {
+  font-size: var(--fs-16);
+  font-weight: 600;
+  color: var(--text-1);
+}
+.act__empty-sub {
+  max-width: 44ch;
+  font-size: var(--fs-13);
+  line-height: 1.5;
+  color: var(--text-3);
+}
+.act__empty .btn {
+  margin-top: var(--sp-2);
+}
+
+/* ---------- Row ---------- */
+.act-row {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-4);
+  padding: var(--sp-4);
+}
+
+.act-row__cover {
+  flex: none;
+  width: 64px;
+  height: 96px;
+  border-radius: var(--radius-s);
+  overflow: hidden;
+  background: var(--bg-active);
+  box-shadow: var(--shadow-1);
+}
+.act-row__img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.act-row__blank {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: flex-end;
+  padding: var(--sp-2);
+  background: linear-gradient(150deg, var(--bg-hover), var(--bg-active));
+  border: 1px solid var(--border);
+  border-radius: inherit;
+  color: var(--text-2);
+}
+.act-row__blank span {
+  font-size: var(--fs-12);
+  font-weight: 600;
+  line-height: 1.25;
+  letter-spacing: -0.01em;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.act-row__main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--sp-2);
+}
+
+.act-row__title {
+  font-size: var(--fs-14);
+  font-weight: 600;
+  line-height: 1.3;
+  color: var(--text-1);
+  max-width: 100%;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.act-row__action {
+  font-size: var(--fs-13);
+  color: var(--text-2);
+}
+.act-row--done .act-row__action {
+  color: var(--ok);
+}
+.act-row--failed .act-row__action {
+  color: var(--danger);
+}
+.act-row--queued .act-row__action,
+.act-row--cancelled .act-row__action {
+  color: var(--text-3);
+}
+
+.act-row__bar {
+  width: 100%;
+  height: 4px;
+  margin-top: var(--sp-1);
+  border-radius: var(--radius-full);
+  background: var(--bg-active);
+  overflow: hidden;
+}
+.act-row__bar-fill {
+  display: block;
+  height: 100%;
+  width: 0;
+  border-radius: var(--radius-full);
+  background: var(--accent);
+  transition: width 180ms var(--ease);
+}
+.act-row--queued .act-row__bar-fill {
+  background: var(--text-3);
+}
+
+.act-row__metrics {
+  font-size: var(--fs-12);
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+.act-row__metrics:empty {
+  display: none;
+}
+
+.act-row__dest {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+  max-width: 100%;
+  margin-top: var(--sp-1);
+}
+.act-row__path {
+  min-width: 0;
+  font-size: var(--fs-12);
+  color: var(--text-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.act-row__error {
+  font-size: var(--fs-12);
+  line-height: 1.45;
+  color: var(--danger);
+  max-width: 100%;
+}
+
+.act-row__aside {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+/* ---------- Narrow windows ---------- */
+@media (max-width: 780px) {
+  .act__inner {
+    padding: var(--sp-5) var(--sp-4);
+  }
+  .act-row {
+    flex-wrap: wrap;
+    gap: var(--sp-3);
+  }
+  .act-row__cover {
+    width: 48px;
+    height: 72px;
+  }
+  .act-row__aside {
+    width: 100%;
+    justify-content: flex-end;
+  }
+}

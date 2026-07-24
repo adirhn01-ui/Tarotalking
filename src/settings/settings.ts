@@ -523,7 +523,12 @@ export function mountSettings(el: HTMLElement, section?: string): SettingsView {
           { value: "off", label: "Off" },
         ]),
       ) +
-      rowHtml("Auto-scroll while listening", switchHtml("p-auto", pb.autoScroll));
+      rowHtml("Auto-scroll while listening", switchHtml("p-auto", pb.autoScroll)) +
+      rowHtml(
+        "Rewind on resume",
+        switchHtml("p-rewind", pb.rewindOnResume),
+        "Resumes a sentence or two earlier after a long pause.",
+      );
     const appBehavior =
       rowHtml(
         "Mini player",
@@ -766,6 +771,9 @@ export function mountSettings(el: HTMLElement, section?: string): SettingsView {
     });
     inner.querySelector<HTMLInputElement>("#p-auto")?.addEventListener("change", (e) => {
       updatePlaybackPrefs({ autoScroll: (e.target as HTMLInputElement).checked });
+    });
+    inner.querySelector<HTMLInputElement>("#p-rewind")?.addEventListener("change", (e) => {
+      updatePlaybackPrefs({ rewindOnResume: (e.target as HTMLInputElement).checked });
     });
     inner.querySelector<HTMLInputElement>("#p-mini")?.addEventListener("change", (e) => {
       updateSettings({ miniPlayer: (e.target as HTMLInputElement).checked });

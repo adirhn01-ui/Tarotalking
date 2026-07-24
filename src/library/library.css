@@ -76,6 +76,21 @@
   gap: var(--sp-2);
   flex: none;
 }
+/* Activity entry point — a dot marks running or queued audio jobs. */
+.lib__activity {
+  position: relative;
+}
+.lib__activity-dot {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  width: 7px;
+  height: 7px;
+  border-radius: var(--radius-full);
+  background: var(--accent);
+  box-shadow: 0 0 0 2px var(--bg-app);
+}
+
 .lib__add svg:last-child {
   width: 14px;
   height: 14px;

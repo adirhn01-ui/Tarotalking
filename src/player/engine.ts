@@ -7,6 +7,9 @@
 //   engineState / activeWord / sleepState stores → subscribe for UI
 //   engine.load/play/pause/toggle/stop/seekTo/next*/prev*/setRate/setVolume
 //   engine.startSleepTimer/cancelSleepTimer, engine.seekToPct
+//
+// The rules behind rewind-on-resume and the sleep fade are pure functions
+// exported below (no DOM), so they can be reasoned about and tested alone.
 
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { getItem, updateItem } from "../core/library";
@@ -65,6 +68,57 @@ export const activeWord = new Store<ActiveWord | null>(null);
 
 export const sleepState = new Store<SleepState>({ until: null, endOfChapter: false });
 
+/* ================= pure playback rules ================= */
+
+/** A pause at least this long steps back one sentence on resume. */
+export const REWIND_ONE_MS = 30_000;
+/** A pause at least this long steps back two. */
+export const REWIND_TWO_MS = 600_000;
+/** The sleep timer fades the audio out over this long before it pauses. */
+export const SLEEP_FADE_MS = 10_000;
+/** How often the fade re-applies its gain — only while actually fading. */
+const FADE_TICK_MS = 200;
+
+/** Sentences to step back when resuming after a pause of `pauseMs`.
+ *  Short pauses resume exactly where playback stopped. */
+export function rewindStepsForPause(pauseMs: number): number {
+  if (!Number.isFinite(pauseMs) || pauseMs < REWIND_ONE_MS) return 0;
+  return pauseMs >= REWIND_TWO_MS ? 2 : 1;
+}
+
+/** Walk back `steps` sentences from `pos`, never crossing backwards into an
+ *  earlier chapter — the chapter's first sentence is the floor. `prev` yields
+ *  the sentence before a position (null at the start of the document). */
+export function rewindTarget(
+  pos: Position,
+  steps: number,
+  prev: (p: Position) => Position | null,
+): Position {
+  let target = pos;
+  for (let i = 0; i < steps; i++) {
+    const back = prev(target);
+    if (!back || back.chapter !== pos.chapter) break;
+    target = back;
+  }
+  return target;
+}
+
+/** Sleep fade gain: 1 when the ramp starts, 0 when the timer fires. */
+export function sleepFadeGain(msRemaining: number, fadeMs: number): number {
+  if (!Number.isFinite(msRemaining)) return 1;
+  if (msRemaining <= 0) return 0;
+  if (fadeMs <= 0) return 1;
+  return Math.min(1, msRemaining / fadeMs);
+}
+
+/** Element volume for a user volume under a fade gain. Gain 1 restores the
+ *  user's configured volume exactly — that is the only "fade is over" state. */
+export function fadedVolume(userVolume: number, gain: number): number {
+  const v = userVolume * gain;
+  if (!Number.isFinite(v)) return 0;
+  return Math.max(0, Math.min(1, v));
+}
+
 /* ================= internals ================= */
 
 function speakable(b: Block | undefined): b is Block & { text: string } {
@@ -95,6 +149,16 @@ let boundIndex = 0;
 let pendingWordSeek: number | null = null;
 let sleepTimeout: number | undefined;
 let lastReportedPlaying: boolean | null = null;
+/** Epoch ms of the pause we're sitting in (null = not paused into a resume).
+ *  Drives rewind-on-resume; cleared by anything that re-picks the position. */
+let pausedAt: number | null = null;
+/** True while the audio element holds a live, mid-sentence clip that `play()`
+ *  may resume in place. Any cancel (seek, stop, voice change) drops it. */
+let audioResumable = false;
+/** Sleep-fade gain applied on top of the user's volume (1 = no fade). */
+let fadeGain = 1;
+let fadeStartTimer: number | undefined;
+let fadeTick: number | undefined;
 
 function key(p: Position): string {
   return `${p.chapter}.${p.block}.${p.sentence}`;
@@ -365,10 +429,69 @@ function armNextBoundary(): void {
   }, delayMs);
 }
 
+/* ---- sleep fade ---- */
+
+function isActive(): boolean {
+  const st = engineState.get().status;
+  return st === "playing" || st === "loading";
+}
+
+function applyAudioVolume(): void {
+  if (audio) audio.volume = fadedVolume(settingsStore.get().playback.volume, fadeGain);
+}
+
+function clearFadeTimers(): void {
+  window.clearTimeout(fadeStartTimer);
+  fadeStartTimer = undefined;
+  window.clearInterval(fadeTick);
+  fadeTick = undefined;
+}
+
+/** Stop any fade and put the user's configured volume back. Every path that
+ *  leaves playback (pause, stop, finish, error, cancel, unload) calls this —
+ *  a faded-out volume must never survive into the next session. */
+function endFade(): void {
+  clearFadeTimers();
+  if (fadeGain !== 1) {
+    fadeGain = 1;
+    applyAudioVolume();
+  }
+}
+
+function rampFade(): void {
+  window.clearInterval(fadeTick);
+  const step = (): void => {
+    const until = sleepState.get().until;
+    // "loading" is a normal gap between sentences — only a real stop ends it.
+    if (until === null || !isActive()) {
+      endFade();
+      return;
+    }
+    fadeGain = sleepFadeGain(until - Date.now(), SLEEP_FADE_MS);
+    applyAudioVolume();
+  };
+  fadeTick = window.setInterval(step, FADE_TICK_MS);
+  step();
+}
+
+/** Schedule the fade for an armed, timed sleep timer. Nothing is scheduled
+ *  unless a deadline exists AND audio is running, so idle ticks nothing.
+ *  End-of-chapter sleep has no deadline to ramp against — it pauses cleanly
+ *  at the chapter break instead. */
+function armFade(): void {
+  clearFadeTimers();
+  const until = sleepState.get().until;
+  if (until === null || !isActive()) return;
+  const lead = until - Date.now() - SLEEP_FADE_MS;
+  if (lead > 0) fadeStartTimer = window.setTimeout(rampFade, lead);
+  else rampFade();
+}
+
 function cancelCurrentAudio(): void {
   clearWordTimer();
   currentBounds = null;
   pendingWordSeek = null;
+  audioResumable = false;
   activeWord.set(null);
   if (utterHandle) {
     utterHandle.cancel();
@@ -415,7 +538,7 @@ async function speakCurrent(): Promise<void> {
     const el = ensureAudio();
     el.src = convertFileSrc(result.path);
     el.playbackRate = engineState.get().rate; // per-book memory, not the global default
-    el.volume = prefs.volume;
+    el.volume = fadedVolume(prefs.volume, fadeGain); // a running sleep fade carries across sentences
     currentBounds = result.boundaries?.length ? result.boundaries : null;
     boundIndex = 0;
     // Click-a-word: jump into the sentence at the clicked word's audio offset
@@ -434,6 +557,7 @@ async function speakCurrent(): Promise<void> {
       return;
     }
     if (myGen !== gen) return;
+    audioResumable = true;
     patchState({ status: "playing" });
     reportPlaying(true);
     scheduleWordHighlight();
@@ -446,7 +570,7 @@ async function speakCurrent(): Promise<void> {
     }
     utterHandle = provider.speak(voice.id, sentence.text, {
       rate: engineState.get().rate,
-      volume: prefs.volume,
+      volume: fadedVolume(prefs.volume, fadeGain),
       onBoundary: (charStart, charLen) => {
         if (myGen !== gen) return;
         if (settingsStore.get().playback.highlight === "word" && charLen > 0) {
@@ -479,7 +603,9 @@ function advance(): void {
   }
   if (sleep.endOfChapter && next.chapter !== pos.chapter) {
     sleepState.set({ until: null, endOfChapter: false });
+    endFade();
     pos = next;
+    pausedAt = Date.now(); // slept through the chapter break — resume rewinds
     patchState({ status: "paused", pos, pct: pctOf(pos) });
     persistPosition();
     reportPlaying(false);
@@ -491,6 +617,8 @@ function advance(): void {
 
 function finish(): void {
   cancelCurrentAudio();
+  endFade();
+  pausedAt = null;
   gen++;
   patchState({ status: "idle", pct: 1 });
   reportPlaying(false);
@@ -499,6 +627,8 @@ function finish(): void {
 
 function fail(message: string): void {
   cancelCurrentAudio();
+  endFade();
+  pausedAt = null;
   gen++;
   patchState({ status: "error", error: message });
   reportPlaying(false);
@@ -561,6 +691,7 @@ function seekInternal(next: Position | null): void {
   gen++;
   cancelCurrentAudio();
   pos = next;
+  pausedAt = null; // an explicit jump IS the chosen spot — never rewind past it
   patchState({ pos, pct: pctOf(pos) });
   persistPosition();
   if (wasActive) {
@@ -580,12 +711,15 @@ export const engine = {
     if (itemId === id && doc) {
       if (engineState.get().status === "idle") {
         pos = normalize(startPos) ?? pos;
+        pausedAt = null;
         patchState({ itemId: id, pos, pct: pctOf(pos) });
       }
       return;
     }
     gen++;
     cancelCurrentAudio();
+    endFade();
+    pausedAt = null;
     reportPlaying(false); // rebinding away from a playing item: tray must not stay "playing"
     prefetch.clear();
     sentenceCache.clear();
@@ -613,6 +747,8 @@ export const engine = {
   unload(): void {
     gen++;
     cancelCurrentAudio();
+    endFade();
+    pausedAt = null;
     prefetch.clear();
     sentenceCache.clear();
     doc = null;
@@ -627,13 +763,33 @@ export const engine = {
     if (!doc) return;
     const st = engineState.get().status;
     if (st === "playing" || st === "loading") return;
+    // Rewind on resume: after a long pause, re-enter a sentence or two back so
+    // the listener lands mid-thought instead of mid-sentence.
+    const steps =
+      pausedAt !== null && settingsStore.get().playback.rewindOnResume
+        ? rewindStepsForPause(Date.now() - pausedAt)
+        : 0;
+    pausedAt = null;
+    if (steps > 0) {
+      // A step back is an ordinary seek: cancel in flight, re-speak from there.
+      const target = rewindTarget(pos, steps, prevPos);
+      gen++;
+      cancelCurrentAudio();
+      pos = target;
+      patchState({ pos, pct: pctOf(pos), error: null });
+      persistPosition();
+      await speakCurrent();
+      armFade();
+      return;
+    }
     // Mid-sentence resume for audio playback.
-    if (st === "paused" && audio && audio.src && audio.currentTime > 0 && !audio.ended && !utterHandle) {
+    if (st === "paused" && audioResumable && audio && audio.src && audio.currentTime > 0 && !audio.ended && !utterHandle) {
       try {
         await audio.play();
         patchState({ status: "playing", error: null });
         reportPlaying(true);
         scheduleWordHighlight();
+        armFade();
         return;
       } catch {
         /* fall through to a fresh speak */
@@ -641,6 +797,7 @@ export const engine = {
     }
     gen++;
     await speakCurrent();
+    armFade();
   },
 
   pause(): void {
@@ -653,7 +810,9 @@ export const engine = {
       utterHandle = null;
     }
     if (audio && !audio.paused) audio.pause();
+    pausedAt = Date.now();
     patchState({ status: "paused" });
+    endFade(); // a manual pause mid-fade must hand the volume back
     reportPlaying(false);
   },
 
@@ -666,6 +825,8 @@ export const engine = {
   stop(): void {
     gen++;
     cancelCurrentAudio();
+    endFade();
+    pausedAt = null;
     if (audio) audio.removeAttribute("src");
     patchState({ status: "idle" });
     reportPlaying(false);
@@ -739,11 +900,12 @@ export const engine = {
   setVolume(volume: number): void {
     updatePlaybackPrefs({ volume });
     patchState({ volume });
-    if (audio) audio.volume = volume;
+    applyAudioVolume(); // respects a fade in progress; becomes the restored level
   },
 
   startSleepTimer(minutesOrChapter: number | "chapter"): void {
     window.clearTimeout(sleepTimeout);
+    endFade(); // re-arming replaces any ramp already in flight
     if (minutesOrChapter === "chapter") {
       sleepState.set({ until: null, endOfChapter: true });
       return;
@@ -752,12 +914,15 @@ export const engine = {
     sleepState.set({ until, endOfChapter: false });
     sleepTimeout = window.setTimeout(() => {
       sleepState.set({ until: null, endOfChapter: false });
-      engine.pause();
+      engine.pause(); // pause() ends the fade and restores the user's volume
+      endFade(); // …and again for the case where playback already stopped
     }, minutesOrChapter * 60_000);
+    armFade();
   },
 
   cancelSleepTimer(): void {
     window.clearTimeout(sleepTimeout);
     sleepState.set({ until: null, endOfChapter: false });
+    endFade(); // cancelling mid-fade brings the volume straight back up
   },
 };

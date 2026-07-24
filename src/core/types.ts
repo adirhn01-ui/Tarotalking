@@ -278,6 +278,9 @@ export interface PlaybackPrefs {
   volume: number; // 0..1
   autoScroll: boolean;
   highlight: HighlightMode;
+  /** Resume a sentence (or two, after a very long pause) before where
+   *  playback stopped, so listening re-enters mid-thought. */
+  rewindOnResume: boolean;
 }
 
 export type AudioQuality = "standard" | "high";
@@ -316,6 +319,7 @@ export const DEFAULT_PLAYBACK_PREFS: PlaybackPrefs = {
   volume: 1,
   autoScroll: true,
   highlight: "sentence",
+  rewindOnResume: true,
 };
 
 /* ================= shortcuts ================= */

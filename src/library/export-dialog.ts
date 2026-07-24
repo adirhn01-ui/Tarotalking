@@ -1,8 +1,9 @@
 // The "Export audiobook" dialog: pick a voice (grouped by the providers that
 // are actually available) and a destination folder, see the estimated output
 // size, then hand the choice back to the library view. This module only
-// collects the user's choices — building chapter payloads, the per-card
-// progress overlay, and the exportAudiobook IPC call all live in library.ts.
+// collects the user's choices — building chapter payloads happens in
+// library.ts, and the run itself goes through the audio-job queue, so an
+// export is never refused because another book is busy.
 
 import { describeError } from "../core/ipc";
 import { escapeHtml, formatBytes, formatTimeLeft, listeningMinutes } from "../core/format";
@@ -47,12 +48,9 @@ function truncateMiddle(s: string, max: number): string {
 
 export function openExportDialog(opts: {
   item: LibraryItem;
-  /** Non-null when another audio job is running: Export is disabled and this
-   *  reason is shown. */
-  busyReason: string | null;
   onExport: (choice: ExportChoice) => void;
 }): void {
-  const { item, busyReason, onExport } = opts;
+  const { item, onExport } = opts;
   const quality = settingsStore.get().audioQuality;
 
   let destDir: string | null = null;
@@ -86,7 +84,6 @@ export function openExportDialog(opts: {
             <span class="lib-modal__hint" style="min-width:0;" data-path>No folder chosen</span>
           </div>
         </div>
-        ${busyReason ? `<div class="lib-modal__text" data-busy>${escapeHtml(busyReason)}</div>` : ""}
       </div>
       <div class="modal__footer">
         <button class="btn" data-close type="button">Cancel</button>
@@ -147,8 +144,9 @@ export function openExportDialog(opts: {
     }
   }
 
+  // Another book's job never blocks this one — exports are queued, not refused.
   function updateExportEnabled(): void {
-    exportBtn.disabled = !!busyReason || !destDir || voiceGroups.length === 0;
+    exportBtn.disabled = !destDir || voiceGroups.length === 0;
   }
 
   updateInfo();

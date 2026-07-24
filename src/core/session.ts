@@ -89,6 +89,7 @@ export function sanitizeSettings(raw: unknown): Settings {
       volume: num(playback.volume, 1, 0, 1),
       autoScroll: bool(playback.autoScroll, true),
       highlight: oneOf(playback.highlight, ["sentence", "word", "off"], "sentence"),
+      rewindOnResume: bool(playback.rewindOnResume, DEFAULT_PLAYBACK_PREFS.rewindOnResume),
     },
     shortcuts,
     audioQuality: oneOf(o.audioQuality, ["standard", "high"], "high"),

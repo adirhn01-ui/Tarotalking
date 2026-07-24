@@ -28,13 +28,28 @@ fn load_from_disk() -> Option<Value> {
     }
 }
 
-fn cached() -> Option<Value> {
-    if let Some(v) = cache_cell().read().unwrap().as_ref() {
-        return v.clone();
+/// Run `f` against the cached settings without copying them. Field reads sit
+/// on the synthesis path (once per sentence, from several precache workers at
+/// once), so they borrow under the read lock instead of cloning the document.
+fn with_settings<T>(f: impl FnOnce(Option<&Value>) -> T) -> T {
+    {
+        let guard = cache_cell().read().unwrap();
+        if let Some(parsed) = guard.as_ref() {
+            return f(parsed.as_ref());
+        }
     }
-    let v = load_from_disk();
-    *cache_cell().write().unwrap() = Some(v.clone());
-    v
+    // First read of the session: populate, then borrow. Loading happens outside
+    // the write lock so a slow disk never blocks other readers longer than the
+    // store itself.
+    let loaded = load_from_disk();
+    {
+        let mut w = cache_cell().write().unwrap();
+        if w.is_none() {
+            *w = Some(loaded);
+        }
+    }
+    let guard = cache_cell().read().unwrap();
+    f(guard.as_ref().and_then(|parsed| parsed.as_ref()))
 }
 
 #[tauri::command]
@@ -56,17 +71,19 @@ pub fn settings_save(settings: Value) -> Result<()> {
 /// Read a single boolean field from settings (used by the Rust shell for
 /// behaviors like close-to-tray without owning the settings schema).
 pub fn read_field_bool(name: &str, default: bool) -> bool {
-    cached()
-        .and_then(|v| v.get(name).and_then(Value::as_bool))
-        .unwrap_or(default)
+    with_settings(|v| v.and_then(|v| v.get(name)).and_then(Value::as_bool)).unwrap_or(default)
 }
 
 /// Read a single numeric field from settings.
 pub fn read_field_u64(name: &str) -> Option<u64> {
-    cached().and_then(|v| v.get(name).and_then(Value::as_u64))
+    with_settings(|v| v.and_then(|v| v.get(name)).and_then(Value::as_u64))
 }
 
 /// Read a single string field from settings.
 pub fn read_field_str(name: &str) -> Option<String> {
-    cached().and_then(|v| v.get(name).and_then(|f| f.as_str().map(String::from)))
+    with_settings(|v| {
+        v.and_then(|v| v.get(name))
+            .and_then(Value::as_str)
+            .map(String::from)
+    })
 }

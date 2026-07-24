@@ -7,14 +7,37 @@ use crate::paths::{audio_cache_dir, atomic_write, ensure_dir};
 use crate::settings::read_field_u64;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
+use std::time::{Duration, Instant, SystemTime};
 use xxhash_rust::xxh3::xxh3_64;
 
 /// Files touched more recently than this are never evicted — they're likely
 /// the sentence that's about to play (or its prefetched neighbours).
 const PRUNE_GRACE: Duration = Duration::from_secs(120);
+/// A cache hit inside this window skips the LRU timestamp touch: the file's
+/// existing timestamp already shields it for at least the rest of the grace
+/// window, so opening it for write would buy nothing on the playback path.
+const BUMP_SKIP: Duration = Duration::from_secs(PRUNE_GRACE.as_secs() / 2);
+/// Shortest gap between two full prune walks. When the grace window blocks
+/// eviction (a precache run just filled the cache) a walk frees nothing, and
+/// repeating it per sentence would be pure overhead.
+const MIN_WALK_GAP: Duration = Duration::from_secs(5);
 /// Default cache cap when settings has no `cacheLimitMB` field.
 const DEFAULT_CAP_MB: u64 = 200;
+
+/// Amortized-prune bookkeeping. A prune walk stats every file in the cache
+/// directory, so running one after every synthesized sentence is O(files) work
+/// on the playback and precache path — with four precache workers, four times
+/// over. Instead we remember the total the last walk measured and the bytes
+/// written since: while that sum stays under the cap, the cache provably needs
+/// no walk at all.
+const TOTAL_UNKNOWN: u64 = u64::MAX;
+static LAST_TOTAL: AtomicU64 = AtomicU64::new(TOTAL_UNKNOWN);
+static PENDING_BYTES: AtomicU64 = AtomicU64::new(0);
+/// Guards the walk itself (one walker at a time) and remembers when the last
+/// one ran; concurrent workers would only re-measure the same directory.
+static WALK_CLOCK: Mutex<Option<Instant>> = Mutex::new(None);
 
 #[derive(Serialize)]
 pub struct CacheStats {
@@ -72,6 +95,68 @@ fn bump_mtime(path: &Path) {
     }
 }
 
+/// Is an LRU touch worth an open-for-write? Only once the file has aged out of
+/// `BUMP_SKIP`: below that it is already prune-proof, so refreshing the stamp
+/// changes no eviction decision. An unreadable or future timestamp refreshes.
+fn needs_mtime_bump(mtime: Option<SystemTime>, now: SystemTime) -> bool {
+    match mtime.and_then(|m| now.duration_since(m).ok()) {
+        Some(age) => age >= BUMP_SKIP,
+        None => true,
+    }
+}
+
+/// Could the cache be over `max_bytes`? `last_total` is what the last prune
+/// walk measured (None = never walked), `pending` the bytes written since.
+/// Only a provably-under-cap cache may skip the walk. `max_bytes` 0 is the
+/// unlimited setting: nothing is ever evicted.
+fn walk_needed(last_total: Option<u64>, pending: u64, max_bytes: u64) -> bool {
+    if max_bytes == 0 {
+        return false;
+    }
+    match last_total {
+        None => true,
+        Some(total) => total.saturating_add(pending) > max_bytes,
+    }
+}
+
+/// Post-write prune gate: account for `added` bytes and walk only when the
+/// cache might have crossed `max_bytes` (and not more often than MIN_WALK_GAP).
+/// The byte count is kept even while the cap is unlimited, so switching a cap
+/// back on still sees everything that was written meanwhile.
+fn prune_after_write(added: u64, max_bytes: u64) {
+    let pending = PENDING_BYTES.fetch_add(added, Ordering::Relaxed).saturating_add(added);
+    let last_total = match LAST_TOTAL.load(Ordering::Relaxed) {
+        TOTAL_UNKNOWN => None,
+        t => Some(t),
+    };
+    if !walk_needed(last_total, pending, max_bytes) {
+        return;
+    }
+    let Ok(mut clock) = WALK_CLOCK.try_lock() else {
+        return; // another worker is walking right now
+    };
+    if clock.is_some_and(|last| last.elapsed() < MIN_WALK_GAP) {
+        return;
+    }
+    *clock = Some(Instant::now());
+    // Reset first: bytes another worker writes during the walk stay pending
+    // (counting them twice only means walking again a little sooner).
+    PENDING_BYTES.store(0, Ordering::Relaxed);
+    LAST_TOTAL.store(prune_to(max_bytes), Ordering::Relaxed);
+}
+
+/// Record a fresh measurement of the cache total (after an explicit prune or
+/// clear) so the next synthesis gate starts from the truth.
+fn record_total(total: u64) {
+    PENDING_BYTES.store(0, Ordering::Relaxed);
+    LAST_TOTAL.store(total, Ordering::Relaxed);
+}
+
+/// Size of a file we just wrote; 0 if it vanished under us.
+fn file_len(path: &Path) -> u64 {
+    std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
+}
+
 fn load_boundaries(sidecar: &Path) -> Option<Vec<WordBoundary>> {
     let text = std::fs::read_to_string(sidecar).ok()?;
     serde_json::from_str(&text).ok()
@@ -84,15 +169,18 @@ pub fn synth_via_cache(provider: &str, voice_id: &str, text: &str) -> Result<Syn
     let dir = audio_cache_dir();
     let key = cache_key(provider, voice_id, text);
     let audio_path = dir.join(format!("{key}.{ext}"));
-    let sidecar = sidecar_path(&audio_path);
 
     // Hit: non-empty audio already on disk.
     if let Ok(meta) = std::fs::metadata(&audio_path) {
         if meta.len() > 0 {
-            bump_mtime(&audio_path);
+            // The stat above already dated the file, so the LRU touch only
+            // costs an open when it can actually change an eviction.
+            if needs_mtime_bump(meta.modified().ok(), SystemTime::now()) {
+                bump_mtime(&audio_path);
+            }
             return Ok(SynthResult {
                 path: audio_path.to_string_lossy().into_owned(),
-                boundaries: load_boundaries(&sidecar),
+                boundaries: load_boundaries(&sidecar_path(&audio_path)),
             });
         }
     }
@@ -150,20 +238,26 @@ pub fn synth_via_cache(provider: &str, voice_id: &str, text: &str) -> Result<Syn
             return Err(e);
         }
     };
-    if audio_path.exists() {
-        let _ = std::fs::remove_file(&audio_path);
-    }
+    // `rename` replaces an existing destination, so a leftover empty file at
+    // the cache path needs no separate unlink.
     std::fs::rename(&staging, &audio_path)?;
+    // Size the pair we just added so the prune gate below can tell whether the
+    // cap is anywhere near. Both stats are noise next to the synthesis that
+    // produced the file, and they replace a full directory walk per sentence.
+    let mut added = file_len(&audio_path);
     if let Some(bounds) = &boundaries {
-        let _ = write_boundaries(&audio_path, bounds);
+        let sidecar = sidecar_path(&audio_path);
+        if write_boundaries(&audio_path, bounds).is_ok() {
+            added += file_len(&sidecar);
+        }
     }
 
     // Keep the cache under the configured cap (never touching fresh files).
     // 0 = unlimited (users pre-synthesizing whole libraries opt into size).
     let cap_mb = read_field_u64("cacheLimitMB").unwrap_or(DEFAULT_CAP_MB);
-    if cap_mb > 0 {
-        let _ = prune(cap_mb.saturating_mul(1024 * 1024));
-    }
+    // Decimal MB, matching the Storage screen's own display and the cap it
+        // sends to cache_prune — "200 MB" must mean one number everywhere.
+        prune_after_write(added, cap_mb.saturating_mul(1_000_000));
 
     Ok(SynthResult {
         path: audio_path.to_string_lossy().into_owned(),
@@ -181,11 +275,13 @@ pub fn write_boundaries(audio_path: &Path, bounds: &[WordBoundary]) -> Result<()
 /// Evict oldest-mtime audio files (each with its sidecar) until the total on
 /// disk is at or below `max_bytes`. Files modified within the grace window are
 /// never removed, so an in-flight sentence is safe even under a tiny cap.
-fn prune(max_bytes: u64) -> Result<()> {
+/// Returns the byte total left in the cache dir — still above `max_bytes` when
+/// the grace window protected everything.
+fn prune_to(max_bytes: u64) -> u64 {
     let dir = audio_cache_dir();
     let read = match std::fs::read_dir(&dir) {
         Ok(r) => r,
-        Err(_) => return Ok(()), // no cache dir yet → nothing to prune
+        Err(_) => return 0, // no cache dir yet → nothing to prune
     };
 
     let now = SystemTime::now();
@@ -230,7 +326,7 @@ fn prune(max_bytes: u64) -> Result<()> {
     }
 
     if total <= max_bytes {
-        return Ok(());
+        return total;
     }
 
     audio.sort_by_key(|(_, _, mtime)| *mtime); // oldest first
@@ -254,7 +350,7 @@ fn prune(max_bytes: u64) -> Result<()> {
             }
         }
     }
-    Ok(())
+    total
 }
 
 #[tauri::command]
@@ -286,6 +382,7 @@ pub fn cache_clear() -> Result<()> {
             }
         }
     }
+    record_total(0);
     Ok(())
 }
 
@@ -294,7 +391,8 @@ pub fn cache_prune(max_bytes: u64) -> Result<()> {
     if max_bytes == 0 {
         return Ok(()); // unlimited
     }
-    prune(max_bytes)
+    record_total(prune_to(max_bytes));
+    Ok(())
 }
 
 #[cfg(test)]
@@ -363,7 +461,7 @@ mod tests {
         }
 
         // Total 3000; cap 2500 → oldest (aaaa) evicted, total 2000 ≤ cap, stop.
-        prune(2500).unwrap();
+        assert_eq!(prune_to(2500), 2000, "reports the total left on disk");
         assert!(!dir.join("aaaa.mp3").exists(), "oldest evicted");
         assert!(dir.join("bbbb.mp3").exists());
         assert!(dir.join("cccc.mp3").exists());
@@ -383,7 +481,9 @@ mod tests {
             std::fs::write(dir.join(name), vec![0u8; 1000]).unwrap();
             // Freshly written → mtime is ~now, inside the grace window.
         }
-        prune(500).unwrap(); // way over cap, but everything is fresh
+        // Way over cap, but everything is fresh: nothing goes, and the
+        // reported total stays above the cap so the caller can back off.
+        assert_eq!(prune_to(500), 2000);
         assert!(dir.join("a.mp3").exists(), "recent files are never evicted");
         assert!(dir.join("b.mp3").exists());
 
@@ -406,11 +506,47 @@ mod tests {
         set_mtime(&audio, old);
         set_mtime(&sidecar, old);
 
-        prune(100).unwrap();
+        prune_to(100);
         assert!(!audio.exists(), "audio evicted");
         assert!(!sidecar.exists(), "sidecar evicted with its audio");
 
         std::env::remove_var("LOCALAPPDATA");
+    }
+
+    #[test]
+    fn walk_needed_only_when_the_cap_could_be_crossed() {
+        // Never measured → must walk (we have no idea what is on disk).
+        assert!(walk_needed(None, 0, 1000));
+        // Provably under the cap → the walk would evict nothing.
+        assert!(!walk_needed(Some(400), 100, 1000));
+        assert!(!walk_needed(Some(1000), 0, 1000), "exactly at the cap is fine");
+        // The pending bytes are what push it over.
+        assert!(walk_needed(Some(900), 200, 1000));
+        assert!(walk_needed(Some(2000), 0, 1000), "already over: keep walking");
+        // A lowered cap re-arms the walk without any new writes.
+        assert!(walk_needed(Some(500), 0, 100));
+        // Absurd accounting must not wrap around into "no walk needed".
+        assert!(walk_needed(Some(u64::MAX - 1), u64::MAX, 1000));
+        // Unlimited evicts nothing, so it never walks — but the bytes written
+        // meanwhile are still counted, and re-arm the walk if a cap comes back.
+        assert!(!walk_needed(None, u64::MAX, 0));
+        assert!(walk_needed(Some(100), 5_000, 1000), "cap back on: walk");
+    }
+
+    #[test]
+    fn mtime_bump_is_skipped_only_inside_the_protection_window() {
+        let now = SystemTime::now();
+        let age = |secs: u64| Some(now - Duration::from_secs(secs));
+        assert!(!needs_mtime_bump(age(1), now), "just written: already protected");
+        assert!(!needs_mtime_bump(age(BUMP_SKIP.as_secs() - 1), now));
+        assert!(needs_mtime_bump(age(BUMP_SKIP.as_secs()), now), "protection thinning");
+        assert!(needs_mtime_bump(age(3600), now), "old file: refresh its LRU stamp");
+        assert!(needs_mtime_bump(None, now), "unknown timestamp: refresh");
+        let future = now + Duration::from_secs(60);
+        assert!(needs_mtime_bump(Some(future), now), "clock skew: refresh");
+        // A skipped bump still leaves at least half the grace window of cover,
+        // which is what makes skipping safe for the sentence about to play.
+        assert!(BUMP_SKIP.as_secs() * 2 <= PRUNE_GRACE.as_secs());
     }
 
     #[test]

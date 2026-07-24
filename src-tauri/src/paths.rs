@@ -60,16 +60,46 @@ pub fn ensure_dir(p: &Path) -> Result<()> {
 }
 
 /// Write via tmp file + rename so a crash never leaves a torn JSON on disk.
+/// `fs::rename` replaces an existing destination (MoveFileEx with
+/// REPLACE_EXISTING on Windows), so the live file only ever holds the old bytes
+/// or the new ones — deleting it first would both cost two syscalls per save
+/// and open a window where it is missing entirely.
 pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     if let Some(parent) = path.parent() {
         ensure_dir(parent)?;
     }
     let tmp = path.with_extension("tmp");
     fs::write(&tmp, bytes)?;
-    // Windows rename fails if the target exists; replace via remove+rename.
-    if path.exists() {
-        fs::remove_file(path)?;
-    }
     fs::rename(&tmp, path)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn atomic_write_creates_parents_and_replaces_existing() {
+        let dir = std::env::temp_dir().join(format!("tarot-paths-{}", uuid::Uuid::new_v4()));
+        let target = dir.join("nested").join("index.json");
+
+        atomic_write(&target, b"first").unwrap();
+        assert_eq!(fs::read(&target).unwrap(), b"first");
+
+        // Overwriting an existing file must succeed and leave no tmp behind.
+        atomic_write(&target, b"second").unwrap();
+        assert_eq!(fs::read(&target).unwrap(), b"second");
+        assert!(!target.with_extension("tmp").exists(), "tmp is renamed away");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn item_dir_rejects_path_traversal() {
+        assert!(item_dir("../escape").is_err());
+        assert!(item_dir("a/b").is_err());
+        assert!(item_dir("").is_err());
+        assert!(item_dir(&"x".repeat(65)).is_err());
+        assert!(item_dir("0f8b-4c2a-9d").is_ok());
+    }
 }

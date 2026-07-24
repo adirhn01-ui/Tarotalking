@@ -33,6 +33,12 @@ describe("sanitizeSettings", () => {
     expect(s.cacheLimitMB).toBe(5);
   });
 
+  it("defaults rewind-on-resume on, and honours an explicit off", () => {
+    expect(sanitizeSettings({}).playback.rewindOnResume).toBe(true);
+    expect(sanitizeSettings({ playback: { rewindOnResume: "yes" } }).playback.rewindOnResume).toBe(true);
+    expect(sanitizeSettings({ playback: { rewindOnResume: false } }).playback.rewindOnResume).toBe(false);
+  });
+
   it("drops an off-list playback rate to 1", () => {
     expect(sanitizeSettings({ playback: { rate: 1.37 } }).playback.rate).toBe(1);
   });

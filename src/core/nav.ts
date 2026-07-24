@@ -4,6 +4,7 @@
 export type Route =
   | { view: "library" }
   | { view: "reader"; itemId: string }
+  | { view: "activity" }
   | { view: "settings"; section?: string };
 
 type Navigate = (route: Route) => void;

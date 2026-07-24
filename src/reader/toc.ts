@@ -1,9 +1,11 @@
 // Reader side panel: Contents + Bookmarks + Highlights tabs. Owns no reading
 // surface — it asks the reader to jump via callbacks and reads live library
 // state for bookmarks/highlights. The Contents tab also drives per-chapter
-// audio pre-synthesis (through ipc.precache). Mounted into the reader's TOC host.
+// audio pre-synthesis, which goes through the shared job queue so it lines up
+// with whole-book prepares and exports instead of colliding with them.
+// Mounted into the reader's TOC host.
 
-import { describeError, ipc, onDownloadProgress } from "../core/ipc";
+import { cancelJob, enqueue, jobsStore } from "../core/jobs";
 import { formatRelative, formatTimeLeft, readingMinutes } from "../core/format";
 import { getItem, libraryStore, removeAnnotation, removeBookmark } from "../core/library";
 import { splitSentences } from "../core/segment";
@@ -128,7 +130,8 @@ export function mountToc(host: HTMLElement, opts: TocOptions): TocController {
   let runningChapter: number | null = null;
   let runningPct = 0;
 
-  const taskPrefix = `precache-ch-${opts.itemId}-`;
+  /** Chapter index → its queued/running job id. */
+  const chapterJobs = new Map<number, string>();
 
   function effectiveVoice(): VoiceRef | null {
     return getItem(opts.itemId)?.voice ?? settingsStore.get().playback.voice;
@@ -165,6 +168,11 @@ export function mountToc(host: HTMLElement, opts: TocOptions): TocController {
       btn.classList.add("toc__prep--running");
       btn.textContent = `${Math.round(runningPct * 100)}%`;
       btn.title = "Preparing audio — click to cancel";
+    } else if (chapterJobs.has(ci)) {
+      // Waiting behind another audio job; clicking still cancels it.
+      btn.classList.add("toc__prep--running");
+      btn.textContent = "…";
+      btn.title = "Queued — click to cancel";
     } else if (preparedChapters.has(ci)) {
       btn.classList.add("toc__prep--done");
       btn.innerHTML = icon.check;
@@ -180,7 +188,7 @@ export function mountToc(host: HTMLElement, opts: TocOptions): TocController {
     if (btn) renderPrepareButton(btn, ci);
   }
 
-  async function startPrepare(ci: number): Promise<void> {
+  function startPrepare(ci: number): void {
     const voice = effectiveVoice();
     if (!voice) {
       toast.error("Pick a voice first");
@@ -191,61 +199,64 @@ export function mountToc(host: HTMLElement, opts: TocOptions): TocController {
       toast.info("Nothing to prepare in this chapter");
       return;
     }
-    runningChapter = ci;
-    runningPct = 0;
-    updatePrepareButton(ci);
-    try {
-      await ipc.precache(
-        voice.provider,
-        voice.id,
-        texts,
-        `${taskPrefix}${ci}`,
-        chapterLabel(opts.doc.chapters[ci]!, ci),
-      );
-      // Completion (and the switch to the "done" glyph) is driven by the
-      // progress "done" event below, which also carries any error.
-    } catch (e) {
-      // Backend rejects (e.g. a job is already running) surface here.
-      if (runningChapter === ci) {
-        runningChapter = null;
-        updatePrepareButton(ci);
-      }
-      const msg = describeError(e);
-      if (msg !== "Cancelled") toast.error(msg);
-    }
+    const item = getItem(opts.itemId);
+    const jobId = enqueue({
+      kind: "prepare",
+      itemId: opts.itemId,
+      title: `${item?.title ?? opts.doc.title} · ${chapterLabel(opts.doc.chapters[ci]!, ci)}`,
+      cover: item?.cover,
+      // Per-chapter jobs of one book must queue side by side, not dedupe.
+      scope: `ch-${ci}`,
+      provider: voice.provider,
+      voiceId: voice.id,
+      texts,
+    });
+    chapterJobs.set(ci, jobId);
+    syncFromJobs();
   }
 
   function onPrepareClick(ci: number): void {
-    if (runningChapter === ci) {
-      void ipc.precacheCancel().catch(() => {});
+    const jobId = chapterJobs.get(ci);
+    if (jobId) {
+      cancelJob(jobId);
       return;
     }
     if (preparedChapters.has(ci)) return; // already prepared this session
-    void startPrepare(ci);
+    startPrepare(ci);
   }
 
-  let unlistenProgress: (() => void) | null = null;
-  void onDownloadProgress((p) => {
-    if (!p.taskId.startsWith(taskPrefix)) return;
-    const ci = Number(p.taskId.slice(taskPrefix.length));
-    if (!Number.isInteger(ci)) return;
-    if (p.done) {
-      if (runningChapter === ci) runningChapter = null;
-      if (p.error) {
-        if (p.error !== "Cancelled") toast.error(p.error);
-      } else {
-        preparedChapters.add(ci);
+  /** Mirror queue state onto the chapter buttons. The queue owns failure
+   *  toasts, so this only tracks per-chapter visuals. */
+  function syncFromJobs(): void {
+    const jobs = jobsStore.get().jobs;
+    let nextRunning: number | null = null;
+    let nextPct = 0;
+    for (const [ci, jobId] of [...chapterJobs]) {
+      const job = jobs.find((j) => j.id === jobId);
+      if (!job) {
+        chapterJobs.delete(ci);
+        updatePrepareButton(ci);
+        continue;
       }
-      updatePrepareButton(ci);
-      return;
+      if (job.status === "running") {
+        nextRunning = ci;
+        nextPct = job.total > 0 ? job.received / job.total : 0;
+      } else if (job.status !== "queued") {
+        if (job.status === "done") preparedChapters.add(ci);
+        chapterJobs.delete(ci);
+        updatePrepareButton(ci);
+      }
     }
-    if (runningChapter === ci) {
-      runningPct = p.total && p.total > 0 ? p.received / p.total : 0;
-      updatePrepareButton(ci);
+    if (nextRunning !== runningChapter || nextPct !== runningPct) {
+      const prev = runningChapter;
+      runningChapter = nextRunning;
+      runningPct = nextPct;
+      if (prev !== null && prev !== nextRunning) updatePrepareButton(prev);
+      if (nextRunning !== null) updatePrepareButton(nextRunning);
     }
-  }).then((u) => {
-    unlistenProgress = u;
-  });
+  }
+
+  const unsubJobs = jobsStore.subscribe(() => syncFromJobs());
 
   /* ---------------- lists ---------------- */
 
@@ -440,7 +451,7 @@ export function mountToc(host: HTMLElement, opts: TocOptions): TocController {
     dispose(): void {
       unsubBookmarks();
       unsubAnnotations();
-      unlistenProgress?.();
+      unsubJobs();
       root.remove();
     },
     refresh(): void {
