@@ -1,6 +1,6 @@
 {
   "name": "tarotalking",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "Fast, lightweight desktop reading and text-to-speech app",
   "license": "GPL-3.0-or-later",
   "repository": {
@@ -29,8 +29,8 @@
   "devDependencies": {
     "@resvg/resvg-js": "^2.6.2",
     "@tauri-apps/cli": "^2",
-    "typescript": "^5.7",
-    "vite": "^6",
-    "vitest": "^3"
+    "typescript": "^7.0.2",
+    "vite": "^8",
+    "vitest": "^4"
   }
 }

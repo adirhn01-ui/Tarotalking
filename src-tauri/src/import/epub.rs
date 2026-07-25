@@ -5,8 +5,9 @@
 
 use crate::error::{AppError, Result};
 use crate::paths;
-use quick_xml::events::{BytesStart, Event};
+use quick_xml::events::{BytesRef, BytesStart, Event};
 use quick_xml::reader::Reader;
+use quick_xml::XmlVersion;
 use serde::Serialize;
 use std::cell::OnceCell;
 use std::collections::{HashMap, HashSet};
@@ -372,9 +373,14 @@ fn parse_nav(bytes: &[u8], toc_dir: &str) -> HashMap<String, String> {
             }
             Ok(Event::Text(e)) => {
                 if in_a {
-                    if let Ok(t) = e.unescape() {
+                    if let Ok(t) = e.xml10_content() {
                         text_buf.push_str(&t);
                     }
+                }
+            }
+            Ok(Event::GeneralRef(e)) => {
+                if in_a {
+                    push_entity(&e, &mut text_buf);
                 }
             }
             Ok(Event::End(e)) => {
@@ -454,9 +460,14 @@ fn parse_ncx(bytes: &[u8], toc_dir: &str) -> HashMap<String, String> {
             }
             Ok(Event::Text(e)) => {
                 if in_text {
-                    if let Ok(t) = e.unescape() {
+                    if let Ok(t) = e.xml10_content() {
                         text_buf.push_str(&t);
                     }
+                }
+            }
+            Ok(Event::GeneralRef(e)) => {
+                if in_text {
+                    push_entity(&e, &mut text_buf);
                 }
             }
             Ok(Event::End(e)) => {
@@ -585,9 +596,14 @@ fn parse_opf(bytes: &[u8], opf_dir: &str) -> Opf {
             }
             Ok(Event::Text(e)) => {
                 if capture != 0 {
-                    if let Ok(t) = e.unescape() {
+                    if let Ok(t) = e.xml10_content() {
                         text_buf.push_str(&t);
                     }
+                }
+            }
+            Ok(Event::GeneralRef(e)) => {
+                if capture != 0 {
+                    push_entity(&e, &mut text_buf);
                 }
             }
             Ok(Event::End(e)) => {
@@ -654,10 +670,30 @@ fn attr_local(e: &BytesStart, local: &[u8]) -> Option<String> {
     for a in e.attributes() {
         let Ok(a) = a else { continue };
         if a.key.local_name().as_ref() == local {
-            return a.unescape_value().ok().map(|c| c.into_owned());
+            return a
+                .normalized_value(XmlVersion::Implicit1_0)
+                .ok()
+                .map(|c| c.into_owned());
         }
     }
     None
+}
+
+/// Entity references arrive as their own events, so a run of text containing
+/// `&amp;` or `&#8217;` is delivered split around them. Resolve numeric
+/// character references and the predefined XML entities back into the run;
+/// an entity that resolves to nothing here is skipped rather than dropping
+/// the surrounding text.
+fn push_entity(e: &BytesRef, out: &mut String) {
+    if let Ok(Some(c)) = e.resolve_char_ref() {
+        out.push(c);
+        return;
+    }
+    if let Ok(name) = e.decode() {
+        if let Some(text) = quick_xml::escape::resolve_predefined_entity(&name) {
+            out.push_str(text);
+        }
+    }
 }
 
 /* ============================ path utils ============================ */
@@ -770,6 +806,29 @@ mod tests {
     use std::sync::PoisonError;
     use zip::write::SimpleFileOptions;
     use zip::CompressionMethod;
+
+    /// Named entities and numeric character references must survive parsing in
+    /// titles, TOC labels and href attributes — the reader reports them as
+    /// their own events, so a text run is delivered split around them.
+    #[test]
+    fn toc_and_metadata_keep_xml_entities() {
+        let opf = br#"<?xml version="1.0"?><package><metadata><dc:title>Bell &amp; Howell&#8217;s Guide</dc:title><dc:creator>A &lt;B&gt; C</dc:creator></metadata><manifest></manifest><spine></spine></package>"#;
+        let opf = parse_opf(opf, "");
+        assert_eq!(opf.title.as_deref(), Some("Bell & Howell\u{2019}s Guide"));
+        assert_eq!(opf.author.as_deref(), Some("A <B> C"));
+
+        let ncx = br#"<?xml version="1.0"?><ncx><navMap><navPoint><navLabel><text>Tom &amp; Jerry &#8212; Part &#8217;96</text></navLabel><content src="c1.xhtml"/></navPoint></navMap></ncx>"#;
+        assert_eq!(
+            parse_ncx(ncx, "").get("c1.xhtml").map(String::as_str),
+            Some("Tom & Jerry \u{2014} Part \u{2019}96")
+        );
+
+        let nav = br#"<?xml version="1.0"?><html><nav epub:type="toc"><ol><li><a href="ch&amp;1.xhtml">R&amp;D &#8212; Intro</a></li></ol></nav></html>"#;
+        assert_eq!(
+            parse_nav(nav, "").get("ch&1.xhtml").map(String::as_str),
+            Some("R&D \u{2014} Intro")
+        );
+    }
 
     fn temp_dir(tag: &str) -> PathBuf {
         let mut p = std::env::temp_dir();

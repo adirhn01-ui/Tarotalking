@@ -9,7 +9,7 @@ export default defineConfig({
   },
   build: {
     target: "chrome120",
-    minify: "esbuild",
+    minify: "oxc",
     sourcemap: false,
     modulePreload: { polyfill: false },
   },
