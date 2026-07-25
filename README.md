@@ -8,7 +8,7 @@ Import a book, a document, or an article; read it in a calm, adjustable reader; 
 
 Tarotalking is the reading-and-listening sibling of [Taroting](https://github.com/adirhn01-ui/Taroting), the video editor built with the same philosophy: ultra-lightweight, framework-free, native shell, performance first.
 
-> **Status: v0.5 — early development.** English-only for now. Windows is the
+> **Status: v0.6 — early development.** English-only for now. Windows is the
 > supported platform today. Not yet code-signed (1.0 is reserved for the
 > signed, published milestone).
 
@@ -41,22 +41,36 @@ The free path — Edge, System, and the local engines — is always the default 
 > The Edge provider speaks over Edge's read-aloud service using the same public protocol every open-source Edge-TTS client uses. It is an unofficial endpoint: Microsoft may change or rate-limit it at any time.
 
 **Listening**
-- Play/pause, previous/next sentence, paragraph, and chapter, seek slider, pitch-preserving speed (0.5×–3×), volume, sleep timer (minutes or end-of-chapter)
+- Play/pause, previous/next sentence, paragraph, and chapter, seek slider, pitch-preserving speed (0.5×–3×), volume, sleep timer (minutes or end-of-chapter) that fades out rather than cutting off
 - The spoken sentence is highlighted and kept in view (auto-scroll is optional); Edge voices highlight word by word; click any sentence to start playback from it
 - Synthesis is prefetched ahead of playback and cached on disk — size-capped from Settings, or set the cache to Unlimited
 - Pre-synthesize a chapter (from the table of contents) or a whole book (from the library card) for instant, offline listening, with a size estimate up front
 - Each book remembers its own voice and speed
+- Resuming after a long pause rewinds a sentence or two, so you re-enter mid-thought instead of mid-sentence
 - A home-screen mini-player keeps playback going while you browse the library
 - Standard/High audio quality setting for the network providers
-- **Export any book as an audiobook**: per-chapter MP3 files with proper tags,
-  chapter names, and cover art — synthesized once with the voice you choose,
-  then playable in any audiobook app on any device (already-prepared audio is
-  reused, so exports of books you've listened to are fast)
+
+**Export as an audiobook**
+- Turn any book into per-chapter MP3 files with proper tags, chapter names,
+  track numbers, and embedded cover art — synthesized once with the voice you
+  choose, then playable in any audiobook app on any device (Apple Books,
+  BookPlayer, your car). Audio you have already listened to or prepared is
+  reused, so those exports are near-instant.
+- Export the whole book, a chapter range, or any set of chapters you pick.
+  Files keep their real chapter numbers, so a partial export still says where
+  it belongs in the book.
+- An **Activity** page shows everything in flight — what is being exported or
+  prepared, progress, time remaining, and where finished exports landed — with
+  per-job cancel. Several jobs run at once and share one bounded pool of
+  synthesis slots, so a quick chapter prepare never waits behind a whole book.
 
 **Desktop integration**
 - Media keys and system media controls (play, pause, next, previous)
 - Background playback: closing the window while listening hides to the tray and keeps playing (configurable); the tray menu has transport controls
 - Native notifications, launch-at-startup option
+- Clean uninstall from Settings: removes the app and every trace of its data —
+  library, settings, caches, downloaded voices, saved keys — while never
+  touching the files you imported from
 - No telemetry, ever
 
 ## Screenshots
@@ -76,6 +90,8 @@ The app is not code-signed yet, so Windows SmartScreen may warn on first launch 
 Performance is the project's #1 veto criterion: no feature ships if it makes the app slower, and every feature must add zero resource cost when unused. The budget every release is held to, on the reference machine (Windows 11, NVMe, WebView2 Evergreen): cold start to window well under a second, and idle RAM in the ~350–400 MB class (app + WebView2 combined).
 
 That budget shapes the architecture: chapters render as the natural window (only the active block gets sentence-level markup), sentence segmentation is lazy, synthesis never runs more than ~2 sentences ahead, paused playback ticks nothing, and there are no polling loops — an idle Tarotalking does no work at all.
+
+The same veto applies to bulk work. Edge voices keep one WebSocket per worker alive across sentences instead of re-handshaking for each one, the local Piper engine keeps its model loaded between sentences, and the audio cache prunes on an amortized schedule rather than walking itself after every sentence — together the difference between an overnight export and a short one on a very long book.
 
 ## Privacy & security
 
