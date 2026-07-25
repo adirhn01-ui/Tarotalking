@@ -733,4 +733,54 @@ mod tests {
         assert!(!is_expired(Duration::from_secs(60), ttl)); // exactly ttl: not yet
         assert!(is_expired(Duration::from_secs(61), ttl));
     }
+
+    /// The engine archive is downloaded, so its entry names are untrusted.
+    /// extract_engine's guard is string-based, which means any change to what
+    /// the zip crate reports as an entry name could silently disarm it — this
+    /// pins the behavior instead of trusting it.
+    #[test]
+    fn hostile_zip_entries_are_rejected() {
+        use std::io::Write as _;
+        use zip::write::SimpleFileOptions;
+
+        fn zip_with(name: &str) -> std::path::PathBuf {
+            let p = std::env::temp_dir().join(format!("tarot-hostile-{}.zip", uuid::Uuid::new_v4()));
+            let mut w = zip::ZipWriter::new(std::fs::File::create(&p).unwrap());
+            let opts = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+            w.start_file(name, opts).unwrap();
+            w.write_all(b"payload").unwrap();
+            w.finish().unwrap();
+            p
+        }
+
+        let root = std::env::temp_dir().join(format!("tarot-extract-{}", uuid::Uuid::new_v4()));
+        let dest = root.join("dest");
+        std::fs::create_dir_all(&dest).unwrap();
+
+        for name in [
+            "../escape.txt",
+            "a/../../escape.txt",
+            "/abs.txt",
+            "\\abs.txt",
+            "C:\\windows\\evil.txt",
+        ] {
+            let z = zip_with(name);
+            let err = extract_engine(&z, &dest);
+            assert!(err.is_err(), "entry {name:?} must be rejected");
+            std::fs::remove_file(&z).ok();
+        }
+
+        // Nothing escaped the destination.
+        assert!(!root.join("escape.txt").exists());
+        assert!(!std::env::temp_dir().join("escape.txt").exists());
+
+        // A benign nested entry still extracts where it belongs.
+        let good = zip_with("engine/bin/tool.exe");
+        extract_engine(&good, &dest).unwrap();
+        assert!(dest.join("engine/bin/tool.exe").is_file());
+        std::fs::remove_file(&good).ok();
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
 }
