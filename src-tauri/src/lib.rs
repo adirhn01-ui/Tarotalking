@@ -214,6 +214,8 @@ pub fn run() {
             library::item_delete,
             // import
             import::epub::import_epub,
+            import::audio::import_audiobook,
+            import::audio::allow_audio_paths,
             import::text::read_text_file,
             import::text::read_file_bytes,
             import::web::fetch_url,

@@ -13,6 +13,8 @@ import { escapeHtml, formatBytes } from "../core/format";
 import { describeError, inTauri, ipc, type CacheStats } from "../core/ipc";
 import { navigate } from "../core/nav";
 import {
+  AUDIO_SKIP_OPTIONS,
+  DEFAULT_AUDIO_SKIP,
   settingsStore,
   updatePlaybackPrefs,
   updateReaderPrefs,
@@ -528,6 +530,15 @@ export function mountSettings(el: HTMLElement, section?: string): SettingsView {
         "Rewind on resume",
         switchHtml("p-rewind", pb.rewindOnResume),
         "Resumes a sentence or two earlier after a long pause.",
+      ) +
+      rowHtml(
+        "Skip amount",
+        selectHtml(
+          "p-skip",
+          String(s.audioSkipSeconds ?? DEFAULT_AUDIO_SKIP),
+          AUDIO_SKIP_OPTIONS.map((n) => ({ value: String(n), label: `${n} seconds` })),
+        ),
+        "How far the audiobook player's skip buttons jump.",
       );
     const appBehavior =
       rowHtml(
@@ -774,6 +785,9 @@ export function mountSettings(el: HTMLElement, section?: string): SettingsView {
     });
     inner.querySelector<HTMLInputElement>("#p-rewind")?.addEventListener("change", (e) => {
       updatePlaybackPrefs({ rewindOnResume: (e.target as HTMLInputElement).checked });
+    });
+    inner.querySelector<HTMLSelectElement>("#p-skip")?.addEventListener("change", (e) => {
+      updateSettings({ audioSkipSeconds: Number((e.target as HTMLSelectElement).value) });
     });
     inner.querySelector<HTMLInputElement>("#p-mini")?.addEventListener("change", (e) => {
       updateSettings({ miniPlayer: (e.target as HTMLInputElement).checked });
@@ -1044,6 +1058,7 @@ export function mountSettings(el: HTMLElement, section?: string): SettingsView {
       updateSettings({
         playback: { ...DEFAULT_PLAYBACK_PREFS },
         audioQuality: DEFAULT_SETTINGS.audioQuality,
+        audioSkipSeconds: DEFAULT_AUDIO_SKIP,
         miniPlayer: DEFAULT_SETTINGS.miniPlayer,
         closeToTray: DEFAULT_SETTINGS.closeToTray,
         resumeLastItem: DEFAULT_SETTINGS.resumeLastItem,

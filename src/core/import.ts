@@ -1,5 +1,6 @@
 // Import pipeline: normalize every source (EPUB, txt/md, pasted text, URL) into
-// a ContentDoc + LibraryItem.
+// a ContentDoc + LibraryItem. Audio files take a parallel path: they carry no
+// text, so they get a LibraryItem with an AudioState and no doc.json at all.
 //
 // Contract (frozen — main.ts and views call these):
 //   importFiles(paths)             → item ids created (toasts per-file errors)
@@ -8,14 +9,22 @@
 //   loadDoc(itemId)                → ContentDoc (from the per-item doc.json cache)
 
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { describeError, ipc } from "./ipc";
-import { addItem } from "./library";
+import { describeError, ipc, type AudiobookImportResult } from "./ipc";
+import { addItem, getItem } from "./library";
 import { countWords } from "./segment";
 import { fileExt, fileName, fileStem } from "./format";
 import { domToBlocks } from "./epub-blocks";
 import { extractArticle } from "./readability";
-import type { Block, Chapter, ContentDoc, LibraryItem, SourceType } from "./types";
-import { POSITION_ZERO } from "./types";
+import type {
+  AudioState,
+  AudioTrack,
+  Block,
+  Chapter,
+  ContentDoc,
+  LibraryItem,
+  SourceType,
+} from "./types";
+import { AUDIO_EXTENSIONS, POSITION_ZERO } from "./types";
 import { toast } from "../ui/toast";
 
 /* ================= pure helpers (unit-tested) ================= */
@@ -122,6 +131,106 @@ export function countDocWords(chapters: Chapter[]): number {
   return n;
 }
 
+/* ---- audiobook grouping ---- */
+
+/** One thing to import: a text-ish file on its own, or a set of audio files
+ *  that together make ONE audiobook. */
+export type ImportUnit =
+  | { kind: "file"; path: string }
+  | { kind: "audiobook"; paths: string[] };
+
+/** Directory part of a path ("C:\a\b\c.mp3" → "C:\a\b"), "" when there is none. */
+function parentDir(path: string): string {
+  const i = Math.max(path.lastIndexOf("\\"), path.lastIndexOf("/"));
+  return i >= 0 ? path.slice(0, i) : "";
+}
+
+const naturalOrder = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
+
+/** Split a mixed selection into import units, keeping the order files were
+ *  given in. The grouping rule:
+ *   - a .m4b holds a whole book in one container, so each one is its own item;
+ *   - every other audio file joins the group for its parent folder, so a book
+ *     split across many mp3s (or a chapter-per-file export) lands as ONE item
+ *     with many tracks;
+ *   - anything else (epub/pdf/txt/md) stays a single-file import, so mixed
+ *     drops still work.
+ *  Files inside a group are ordered naturally by name ("2" before "10") as a
+ *  starting point; track tags refine it during import. Pure. */
+export function groupImportPaths(paths: string[]): ImportUnit[] {
+  const units: ImportUnit[] = [];
+  const groups = new Map<string, string[]>();
+  for (const path of paths) {
+    const ext = fileExt(path);
+    if (!AUDIO_EXTENSIONS.has(ext)) {
+      units.push({ kind: "file", path });
+      continue;
+    }
+    if (ext === "m4b") {
+      units.push({ kind: "audiobook", paths: [path] });
+      continue;
+    }
+    const key = parentDir(path).toLowerCase();
+    const existing = groups.get(key);
+    if (existing) {
+      existing.push(path);
+      continue;
+    }
+    // The unit holds this very array, so later pushes land in the same group.
+    const fresh = [path];
+    groups.set(key, fresh);
+    units.push({ kind: "audiobook", paths: fresh });
+  }
+  for (const group of groups.values()) {
+    group.sort((a, b) => naturalOrder.compare(fileName(a), fileName(b)));
+  }
+  return units;
+}
+
+/** Title to fall back on when the files carry no album/title tag: the folder
+ *  name for a multi-file book, the file name for a single one. */
+export function audiobookFallbackTitle(paths: string[]): string {
+  const first = paths[0];
+  if (!first) return "Audiobook";
+  if (paths.length === 1) return fileStem(first) || "Audiobook";
+  return fileName(parentDir(first)) || fileStem(first) || "Audiobook";
+}
+
+function trackSeconds(v: unknown): number {
+  return typeof v === "number" && Number.isFinite(v) && v > 0 ? v : 0;
+}
+
+/** Build the LibraryItem for an imported audiobook from what the backend read
+ *  off the files. Audiobooks carry no text: wordCount stays 0, chapterCount is
+ *  the track count, and no doc.json is ever written for them. Pure. */
+export function buildAudiobookItem(
+  id: string,
+  paths: string[],
+  res: AudiobookImportResult,
+): LibraryItem {
+  const tracks: AudioTrack[] = res.tracks.map((t) => ({
+    path: t.path,
+    title: t.title?.trim() || fileStem(t.path),
+    durationSec: trackSeconds(t.durationSec),
+  }));
+  const audio: AudioState = {
+    tracks,
+    trackIndex: 0,
+    offsetSec: 0,
+    totalSec: tracks.reduce((sum, t) => sum + t.durationSec, 0),
+  };
+  return makeItem({
+    id,
+    title: res.title?.trim() || audiobookFallbackTitle(paths),
+    author: res.author?.trim() || undefined,
+    sourceType: "audiobook",
+    wordCount: 0,
+    chapterCount: tracks.length,
+    cover: res.coverPath ?? undefined,
+    audio,
+  });
+}
+
 /* ================= internals ================= */
 
 function hostOf(url: string): string {
@@ -163,6 +272,8 @@ interface NewItemParams {
   wordCount: number;
   chapterCount: number;
   cover?: string;
+  /** Audiobook items only — the tracks and where listening left off. */
+  audio?: AudioState;
 }
 
 function makeItem(p: NewItemParams): LibraryItem {
@@ -182,6 +293,7 @@ function makeItem(p: NewItemParams): LibraryItem {
     playback: { ...POSITION_ZERO },
     progressPct: 0,
     bookmarks: [],
+    ...(p.audio ? { audio: p.audio } : {}),
   };
 }
 
@@ -300,22 +412,40 @@ async function importTextFile(path: string, markdown: boolean): Promise<{ id: st
   return { id, title };
 }
 
+/** Read tags and durations for one book's audio files. Nothing is copied — the
+ *  backend only extracts cover art and lets these exact paths into the asset
+ *  scope. No doc.json is written: an audiobook has no text. */
+async function importAudiobookFiles(paths: string[]): Promise<{ id: string; title: string }> {
+  const id = crypto.randomUUID();
+  const res = await ipc.importAudiobook(id, paths);
+  if (res.tracks.length === 0) throw new Error("No playable audio in this selection");
+  const item = buildAudiobookItem(id, paths, res);
+  addItem(item);
+  return { id, title: item.title };
+}
+
 /* ================= public API ================= */
+
+async function importUnit(unit: ImportUnit): Promise<{ id: string; title: string }> {
+  if (unit.kind === "audiobook") return importAudiobookFiles(unit.paths);
+  const path = unit.path;
+  const ext = fileExt(path);
+  if (ext === "epub") return importEpubFile(path);
+  if (ext === "pdf") return importPdfFile(path);
+  if (ext === "txt" || ext === "md") return importTextFile(path, ext === "md");
+  throw new Error("Unsupported file type");
+}
 
 export async function importFiles(paths: string[]): Promise<string[]> {
   const ids: string[] = [];
-  for (const path of paths) {
+  for (const unit of groupImportPaths(paths)) {
+    const label = unit.kind === "audiobook" ? unit.paths[0]! : unit.path;
     try {
-      const ext = fileExt(path);
-      let created: { id: string; title: string };
-      if (ext === "epub") created = await importEpubFile(path);
-      else if (ext === "pdf") created = await importPdfFile(path);
-      else if (ext === "txt" || ext === "md") created = await importTextFile(path, ext === "md");
-      else throw new Error("Unsupported file type");
+      const created = await importUnit(unit);
       ids.push(created.id);
       toast.info(`Added ${created.title}`);
     } catch (e) {
-      toast.error(`${fileName(path)}: ${describeError(e)}`);
+      toast.error(`${fileName(label)}: ${describeError(e)}`);
     }
   }
   return ids;
@@ -381,6 +511,11 @@ export async function importUrl(url: string): Promise<string | null> {
 }
 
 export async function loadDoc(itemId: string): Promise<ContentDoc> {
+  // Audiobooks never get a doc.json — say so plainly instead of reporting the
+  // missing file as corruption.
+  if (getItem(itemId)?.sourceType === "audiobook") {
+    throw new Error("Audiobooks have no text to read");
+  }
   const raw = await ipc.readDoc(itemId);
   if (!raw || typeof raw !== "object" || !Array.isArray((raw as { chapters?: unknown }).chapters)) {
     throw new Error("This item's content is unreadable");

@@ -13,6 +13,13 @@ import {
   PLAYBACK_RATES,
 } from "./types";
 
+/** How far the audiobook player's skip buttons jump, in seconds. Declared as an
+ *  augmentation so the setting travels with the code that sanitizes it; it is
+ *  optional on the interface because DEFAULT_SETTINGS predates it, but
+ *  sanitizeSettings always fills it in, so a loaded settings object has it. */
+export const AUDIO_SKIP_OPTIONS = [5, 10, 15, 30] as const;
+export const DEFAULT_AUDIO_SKIP = 5;
+
 export const settingsStore = new Store<Settings>(DEFAULT_SETTINGS);
 
 export function applyTheme(theme: AppTheme): void {
@@ -40,6 +47,10 @@ function str(v: unknown, def: string): string {
 function oneOf<T extends string>(v: unknown, allowed: readonly T[], def: T): T {
   return typeof v === "string" && (allowed as readonly string[]).includes(v) ? (v as T) : def;
 }
+/** Like oneOf, for settings whose values are a fixed set of numbers. */
+function oneOfNumber(v: unknown, allowed: readonly number[], def: number): number {
+  return typeof v === "number" && allowed.includes(v) ? v : def;
+}
 
 function sanitizeVoice(v: unknown): VoiceRef | null {
   if (!v || typeof v !== "object") return null;
@@ -58,7 +69,13 @@ function sanitizeVoice(v: unknown): VoiceRef | null {
 }
 
 export function sanitizeSettings(raw: unknown): Settings {
-  if (!raw || typeof raw !== "object") return { ...DEFAULT_SETTINGS, shortcuts: { ...DEFAULT_SHORTCUTS } };
+  if (!raw || typeof raw !== "object") {
+    return {
+      ...DEFAULT_SETTINGS,
+      shortcuts: { ...DEFAULT_SHORTCUTS },
+      audioSkipSeconds: DEFAULT_AUDIO_SKIP,
+    };
+  }
   const o = raw as Record<string, unknown>;
   const reader = (o.reader ?? {}) as Record<string, unknown>;
   const playback = (o.playback ?? {}) as Record<string, unknown>;
@@ -93,6 +110,7 @@ export function sanitizeSettings(raw: unknown): Settings {
     },
     shortcuts,
     audioQuality: oneOf(o.audioQuality, ["standard", "high"], "high"),
+    audioSkipSeconds: oneOfNumber(o.audioSkipSeconds, AUDIO_SKIP_OPTIONS, DEFAULT_AUDIO_SKIP),
     miniPlayer: bool(o.miniPlayer, DEFAULT_SETTINGS.miniPlayer),
     // 0 = unlimited (pre-synthesized libraries can be large by choice).
     cacheLimitMB: num(o.cacheLimitMB, DEFAULT_SETTINGS.cacheLimitMB, 0, 100_000),

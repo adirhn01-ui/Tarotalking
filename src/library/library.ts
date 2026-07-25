@@ -26,7 +26,7 @@ import {
   touchOpened,
   updateItem,
 } from "../core/library";
-import { navigate } from "../core/nav";
+import { itemRoute, navigate } from "../core/nav";
 import { escapeHtml, formatBytes, formatTimeLeft, readingMinutes } from "../core/format";
 import { loadDoc } from "../core/import";
 import { splitSentences } from "../core/segment";
@@ -39,7 +39,12 @@ import type {
   ProviderId,
   SourceType,
 } from "../core/types";
-import { audioBytesPerSecond, POSITION_ZERO } from "../core/types";
+import {
+  audioBytesPerSecond,
+  AUDIO_EXTENSIONS,
+  IMPORT_EXTENSIONS,
+  POSITION_ZERO,
+} from "../core/types";
 import { subscribeSelect } from "../core/store";
 import { trapTab } from "../ui/focus";
 import { icon } from "../ui/icons";
@@ -300,6 +305,7 @@ function sourceIcon(type: SourceType): string {
   if (type === "url") return icon.globe;
   if (type === "text" || type === "pdf") return icon.fileText;
   if (type === "paste") return icon.clipboard;
+  if (type === "audiobook") return icon.headphones;
   return icon.book;
 }
 
@@ -307,15 +313,42 @@ function badgeLabel(item: LibraryItem): string | null {
   if (item.sourceType === "url") return "Web";
   if (item.sourceType === "pdf") return "PDF";
   if (item.sourceType === "text" || item.sourceType === "paste") return "Text";
+  if (item.sourceType === "audiobook") return "Audio";
   return null;
+}
+
+export function isAudiobook(item: LibraryItem): boolean {
+  return item.sourceType === "audiobook";
+}
+
+/** An audiobook's card line: how long it runs and how many files it came in.
+ *  A book whose files have gone missing still renders — the counts just read
+ *  as zero and the player reports the broken tracks. Pure. */
+export function audiobookSubLine(item: LibraryItem): string {
+  const tracks = item.audio?.tracks.length ?? 0;
+  const total = item.audio?.totalSec ?? 0;
+  const length = total > 0 ? formatTimeLeft(total / 60) : null;
+  const count = `${tracks} ${tracks === 1 ? "track" : "tracks"}`;
+  return length ? `${length} · ${count}` : count;
 }
 
 function subLine(item: LibraryItem): string {
   // In-progress items show where you left off; untouched/finished ones show
-  // their source (author / site).
+  // their source (author / site) — or, for audiobooks, their running length.
   if (item.chapterLabel && item.progressPct > 0 && !isFinished(item)) return item.chapterLabel;
+  if (isAudiobook(item)) return audiobookSubLine(item);
   if (item.sourceType === "url") return item.sourceUrl ? hostOf(item.sourceUrl) : "Web";
   return item.author ?? "";
+}
+
+/** "3 h 12 min left" — from listening time for audiobooks, silent-reading time
+ *  for everything else. Pure. */
+export function timeLeftLabel(item: LibraryItem): string {
+  const pct = Math.max(0, Math.min(1, item.progressPct));
+  const minutes = isAudiobook(item)
+    ? ((item.audio?.totalSec ?? 0) * (1 - pct)) / 60
+    : readingMinutes(item.wordCount * (1 - pct));
+  return `${formatTimeLeft(minutes)} left`;
 }
 
 function coverInner(item: LibraryItem): string {
@@ -363,7 +396,7 @@ function cardHtml(item: LibraryItem): string {
 
 function railCardHtml(item: LibraryItem): string {
   const pct = item.progressPct;
-  const left = `${formatTimeLeft(readingMinutes(item.wordCount * (1 - pct)))} left`;
+  const left = timeLeftLabel(item);
   const sub = subLine(item);
   return `<button class="lib-rail__card" data-id="${escapeHtml(item.id)}">
       <div class="lib-rail__cover">${coverInner(item)}</div>
@@ -398,6 +431,9 @@ function librarySignature(idx: LibraryIndex): string {
         Math.round(i.progressPct * 100),
         i.chapterLabel ?? "",
         i.collections.join(","),
+        // Track count and running length are fixed at import; the per-tick
+        // trackIndex/offsetSec are deliberately left out.
+        i.audio ? `${i.audio.tracks.length}/${Math.round(i.audio.totalSec)}` : "",
       ].join(""),
     )
     .join("\n");
@@ -413,6 +449,8 @@ function matchesFilter(item: LibraryItem): boolean {
       return true;
     case "books":
       return item.sourceType === "epub" || item.sourceType === "pdf";
+    case "audiobooks":
+      return item.sourceType === "audiobook";
     case "articles":
       return item.sourceType === "url";
     case "text":
@@ -565,13 +603,14 @@ function openConfirm(opts: {
 
 /* ================= import entry points ================= */
 
-async function pickAndImportFiles(): Promise<void> {
+const READABLE_EXTENSIONS = ["epub", "pdf", "txt", "md"];
+
+/** Open the file picker and import whatever comes back. Audio files picked
+ *  together are grouped into one audiobook by the import pipeline. */
+async function pickAndImport(filters: { name: string; extensions: string[] }[]): Promise<void> {
   try {
     const { open } = await import("@tauri-apps/plugin-dialog");
-    const picked = await open({
-      multiple: true,
-      filters: [{ name: "Readable files", extensions: ["epub", "pdf", "txt", "md"] }],
-    });
+    const picked = await open({ multiple: true, filters });
     if (!picked) return;
     const paths = Array.isArray(picked) ? picked : [picked];
     if (paths.length === 0) return;
@@ -580,6 +619,19 @@ async function pickAndImportFiles(): Promise<void> {
   } catch (e) {
     toast.error(describeError(e));
   }
+}
+
+function pickAndImportFiles(): Promise<void> {
+  return pickAndImport([
+    { name: "All supported files", extensions: [...IMPORT_EXTENSIONS] },
+    { name: "Books & documents", extensions: READABLE_EXTENSIONS },
+    { name: "Audio", extensions: [...AUDIO_EXTENSIONS] },
+  ]);
+}
+
+/** Audio-only picker: select one .m4b, or every part of a multi-file book. */
+function pickAndImportAudiobook(): Promise<void> {
+  return pickAndImport([{ name: "Audio", extensions: [...AUDIO_EXTENSIONS] }]);
 }
 
 function openPasteModal(): void {
@@ -705,20 +757,24 @@ function openWebModal(): void {
 /* ================= per-item actions ================= */
 
 function openItem(id: string): void {
+  const item = getItem(id);
+  if (!item) return;
   touchOpened(id);
-  navigate({ view: "reader", itemId: id });
+  navigate(itemRoute(item));
 }
 
 function markFinished(id: string): void {
   updateItem(id, { progressPct: 1, finished: true });
 }
 
-function markUnread(id: string): void {
-  updateItem(id, {
+function markUnread(item: LibraryItem): void {
+  updateItem(item.id, {
     progressPct: 0,
     finished: false,
     reading: { ...POSITION_ZERO },
     playback: { ...POSITION_ZERO },
+    // An audiobook's place lives in its AudioState, not in a Position.
+    ...(item.audio ? { audio: { ...item.audio, trackIndex: 0, offsetSec: 0 } } : {}),
   });
 }
 
@@ -753,31 +809,41 @@ function promptDelete(item: LibraryItem): void {
   });
 }
 
+/** The prepare/export entry for one item. The queue means no item is ever
+ *  blocked by another book's job — the only reason an entry turns into a
+ *  cancel is that THIS item already has a job of that kind. */
+function audioJobMenuItem(item: LibraryItem, kind: JobKind): MenuItem {
+  const job = activeJob(item.id, kind);
+  if (kind === "prepare") {
+    return job
+      ? { label: "Cancel preparing", onSelect: () => cancelJob(job.id) }
+      : {
+          label: `Prepare audio (~${formatBytes(prepareEstimate(item))})`,
+          onSelect: () => void prepareAudio(item),
+        };
+  }
+  return job
+    ? { label: "Cancel exporting", onSelect: () => cancelJob(job.id) }
+    : { label: "Export audiobook", onSelect: () => openExport(item) };
+}
+
 function openItemMenu(item: LibraryItem, x: number, y: number): void {
   const idx = libraryStore.get();
-  // The queue means no item is ever blocked by another book's job — the only
-  // reason an entry changes is that THIS item already has one of that kind.
-  const prepJob = activeJob(item.id, "prepare");
-  const expJob = activeJob(item.id, "export");
-  const prepareItem: MenuItem = prepJob
-    ? { label: "Cancel preparing", onSelect: () => cancelJob(prepJob.id) }
-    : {
-        label: `Prepare audio (~${formatBytes(prepareEstimate(item))})`,
-        onSelect: () => void prepareAudio(item),
-      };
-  const exportItem: MenuItem = expJob
-    ? { label: "Cancel exporting", onSelect: () => cancelJob(expJob.id) }
-    : { label: "Export audiobook", onSelect: () => openExport(item) };
-  const items: MenuItem[] = [
-    { label: "Resume reading", onSelect: () => openItem(item.id) },
-    { label: "Play from current position", onSelect: () => openItem(item.id) },
-    prepareItem,
-    exportItem,
-    {
-      label: item.favorite ? "Remove from favorites" : "Add to favorites",
-      onSelect: () => updateItem(item.id, { favorite: !item.favorite }),
-    },
-  ];
+  // Prepare/export synthesize speech from text, so an audiobook — which has
+  // none — offers neither. Everything below (favorites, collections, rename,
+  // finished, delete) applies to any item.
+  const items: MenuItem[] = isAudiobook(item)
+    ? [{ label: "Resume listening", onSelect: () => openItem(item.id) }]
+    : [
+        { label: "Resume reading", onSelect: () => openItem(item.id) },
+        { label: "Play from current position", onSelect: () => openItem(item.id) },
+        audioJobMenuItem(item, "prepare"),
+        audioJobMenuItem(item, "export"),
+      ];
+  items.push({
+    label: item.favorite ? "Remove from favorites" : "Add to favorites",
+    onSelect: () => updateItem(item.id, { favorite: !item.favorite }),
+  });
   for (const col of idx.collections) {
     const inCol = item.collections.includes(col.id);
     items.push({
@@ -786,7 +852,7 @@ function openItemMenu(item: LibraryItem, x: number, y: number): void {
     });
   }
   items.push({ label: "Rename", onSelect: () => promptRename(item) });
-  if (isFinished(item)) items.push({ label: "Mark as unread", onSelect: () => markUnread(item.id) });
+  if (isFinished(item)) items.push({ label: "Mark as unread", onSelect: () => markUnread(item) });
   else items.push({ label: "Mark as finished", onSelect: () => markFinished(item.id) });
   items.push({ label: "Delete", danger: true, onSelect: () => promptDelete(item) });
   showMenu(x, y, items);
@@ -812,9 +878,10 @@ function emptyStateHtml(): string {
       <div class="empty-state">
         ${icon.bookOpen}
         <div class="lib-empty__title">Your library is empty</div>
-        <div class="lib-empty__sub">Import an EPUB, PDF, or text file, paste text, or add an article from the web — or just drop files here.</div>
+        <div class="lib-empty__sub">Import an EPUB, PDF, text file, or audiobook, paste text, or add an article from the web — or just drop files here.</div>
         <div class="lib-empty__actions">
           <button class="btn btn--primary" data-act="import" type="button">${icon.plus}Import files</button>
+          <button class="btn" data-act="audiobook" type="button">${icon.headphones}Import audiobook</button>
           <button class="btn" data-act="paste" type="button">${icon.clipboard}Paste text</button>
           <button class="btn" data-act="web" type="button">${icon.globe}Add from web</button>
         </div>
@@ -839,6 +906,7 @@ function filtersHtml(idx: LibraryIndex): string {
       <div class="lib-filters__pills">
         ${pill("all", "All")}
         ${pill("books", "Books")}
+        ${pill("audiobooks", "Audiobooks")}
         ${pill("articles", "Articles")}
         ${pill("text", "Text")}
         ${pill("favorites", `<span class="lib-pill__ico">${icon.star}</span>Favorites`)}
@@ -935,6 +1003,7 @@ export function mountLibrary(el: HTMLElement): LibraryView {
     if (act) {
       const a = act.dataset.act;
       if (a === "import") void pickAndImportFiles();
+      else if (a === "audiobook") void pickAndImportAudiobook();
       else if (a === "paste") openPasteModal();
       else if (a === "web") openWebModal();
       return;
@@ -1007,6 +1076,7 @@ export function mountLibrary(el: HTMLElement): LibraryView {
     const r = addBtn.getBoundingClientRect();
     showMenu(r.left, r.bottom + 4, [
       { label: "Import files", onSelect: () => void pickAndImportFiles() },
+      { label: "Import audiobook", onSelect: () => void pickAndImportAudiobook() },
       { label: "Paste text", onSelect: openPasteModal },
       { label: "Add from web", onSelect: openWebModal },
     ]);

@@ -34,7 +34,27 @@ export interface ContentDoc {
 
 /* ================= library ================= */
 
-export type SourceType = "epub" | "text" | "paste" | "url" | "pdf";
+export type SourceType = "epub" | "text" | "paste" | "url" | "pdf" | "audiobook";
+
+/** One audio file of an imported audiobook. Files are referenced where they
+ *  live — audiobooks are gigabytes, so nothing is copied into the library. */
+export interface AudioTrack {
+  /** Absolute path on disk. Allowed into the asset scope at import and boot. */
+  path: string;
+  title: string;
+  durationSec: number;
+}
+
+/** Playback state of an audiobook item (no text, so no Position). */
+export interface AudioState {
+  tracks: AudioTrack[];
+  /** Index into `tracks` of the track last played. */
+  trackIndex: number;
+  /** Offset within that track, seconds. */
+  offsetSec: number;
+  /** Sum of all track durations, seconds. */
+  totalSec: number;
+}
 
 /** A location inside a ContentDoc. Sentence indices are per-block,
  *  lazily derived via Intl.Segmenter (never persisted per-book). */
@@ -107,6 +127,9 @@ export interface LibraryItem {
   voice?: VoiceRef;
   /** Per-book speed memory — overrides the global default when set. */
   rate?: number;
+  /** Present only on audiobook items: the audio files and where you left
+   *  off in them. Text items keep using reading/playback Positions. */
+  audio?: AudioState;
 }
 
 export interface Collection {
@@ -124,7 +147,15 @@ export interface LibraryIndex {
 export const EMPTY_LIBRARY: LibraryIndex = { version: 1, items: [], collections: [] };
 
 /** File extensions accepted for import. */
-export const IMPORT_EXTENSIONS = new Set(["epub", "txt", "md", "pdf"]);
+export const IMPORT_EXTENSIONS = new Set([
+  "epub", "txt", "md", "pdf",
+  ...["mp3", "m4a", "m4b", "aac", "flac", "ogg", "opus", "wav"],
+]);
+
+/** Extensions treated as audiobook audio rather than readable text. */
+export const AUDIO_EXTENSIONS = new Set([
+  "mp3", "m4a", "m4b", "aac", "flac", "ogg", "opus", "wav",
+]);
 
 /* ================= voices / TTS ================= */
 
@@ -295,6 +326,8 @@ export interface Settings {
   /** Compact now-playing bar on the library while a book plays elsewhere.
    *  When off, leaving the reader pauses playback instead. */
   miniPlayer: boolean;
+  /** How far the audiobook player's skip buttons jump, in seconds. */
+  audioSkipSeconds: number;
   shortcuts: Record<string, string>;
   cacheLimitMB: number;
   closeToTray: boolean;
@@ -401,6 +434,7 @@ export const DEFAULT_SETTINGS: Settings = {
   playback: DEFAULT_PLAYBACK_PREFS,
   audioQuality: "high",
   miniPlayer: true,
+  audioSkipSeconds: 5,
   shortcuts: { ...DEFAULT_SHORTCUTS },
   cacheLimitMB: 200,
   closeToTray: true,

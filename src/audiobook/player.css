@@ -1,0 +1,334 @@
+/* Audiobook player view
+   One centred column: art, title, timeline, transport, track list. Tokens
+   only, so it reads as the same product in both themes. */
+
+/* ---------- Shell ---------- */
+.abp {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-app);
+}
+
+/* Several blocks below are flex containers, so the UA's [hidden] rule loses
+   to their class. Restore it once, for everything inside the page. */
+.abp [hidden] {
+  display: none;
+}
+
+.abp__topbar {
+  flex: none;
+  height: 52px;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: 0 var(--sp-4);
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-panel);
+}
+.abp__topbar-title {
+  min-width: 0;
+  font-size: var(--fs-14);
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.abp__body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+.abp__inner {
+  max-width: 520px;
+  margin: 0 auto;
+  padding: var(--sp-8) var(--sp-6) var(--sp-10);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--sp-5);
+}
+
+/* ---------- Cover ---------- */
+.abp__art {
+  width: 260px;
+  max-width: 62vw;
+  aspect-ratio: 1 / 1;
+  border-radius: var(--radius-l);
+  overflow: hidden;
+  background: var(--bg-active);
+  box-shadow: var(--shadow-3);
+}
+.abp__art-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.abp__art-blank {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: flex-end;
+  padding: var(--sp-4);
+  background: linear-gradient(150deg, var(--bg-hover), var(--bg-active));
+  border: 1px solid var(--border);
+  border-radius: inherit;
+  color: var(--text-2);
+}
+.abp__art-blank span {
+  font-size: var(--fs-16);
+  font-weight: 600;
+  line-height: 1.3;
+  letter-spacing: -0.01em;
+  display: -webkit-box;
+  -webkit-line-clamp: 4;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* ---------- Title ---------- */
+.abp__meta {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--sp-1);
+  text-align: center;
+  max-width: 100%;
+}
+.abp__title {
+  font-size: var(--fs-20);
+  font-weight: 600;
+  line-height: 1.25;
+  letter-spacing: -0.01em;
+  color: var(--text-1);
+  margin: 0;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.abp__author {
+  font-size: var(--fs-13);
+  color: var(--text-2);
+}
+.abp__author:empty {
+  display: none;
+}
+
+/* ---------- Missing file ---------- */
+.abp__fault {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-4);
+  text-align: center;
+  border-color: var(--danger);
+  background: var(--danger-dim);
+}
+.abp__fault svg {
+  width: 20px;
+  height: 20px;
+  color: var(--danger);
+}
+.abp__fault-text {
+  font-size: var(--fs-13);
+  line-height: 1.5;
+  color: var(--text-1);
+  max-width: 44ch;
+}
+.abp__fault-actions {
+  display: flex;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+  justify-content: center;
+}
+
+/* ---------- Timeline ---------- */
+.abp__timeline {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+.abp__seek {
+  width: 100%;
+}
+.abp__times {
+  display: flex;
+  justify-content: space-between;
+  font-size: var(--fs-12);
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------- Transport ---------- */
+.abp__transport {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-2);
+}
+.abp__play {
+  width: 52px;
+  height: 52px;
+  border-radius: var(--radius-full);
+  margin: 0 var(--sp-2);
+}
+.abp__play svg {
+  width: 20px;
+  height: 20px;
+}
+.abp__skip {
+  gap: 5px;
+  padding: 0 var(--sp-3);
+  font-variant-numeric: tabular-nums;
+}
+.abp__skip-amount {
+  font-size: var(--fs-12);
+  color: var(--text-2);
+}
+
+/* ---------- Status ---------- */
+.abp__status {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  text-align: center;
+  max-width: 100%;
+}
+.abp__now {
+  font-size: var(--fs-14);
+  font-weight: 500;
+  color: var(--text-1);
+  max-width: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.abp__count,
+.abp__book {
+  font-size: var(--fs-12);
+  font-variant-numeric: tabular-nums;
+}
+.abp__book:empty {
+  display: none;
+}
+
+.abp__tools {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+/* ---------- Track list ---------- */
+.abp__tracks {
+  width: 100%;
+  overflow: hidden;
+}
+.abp__tracks-head {
+  font-size: var(--fs-12);
+  font-weight: 600;
+  color: var(--text-2);
+  padding: var(--sp-3) var(--sp-4);
+  margin: 0;
+  border-bottom: 1px solid var(--border);
+}
+.abp__tracks-list {
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.abp-track {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  width: 100%;
+  padding: var(--sp-2) var(--sp-4);
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  color: var(--text-1);
+  font-size: var(--fs-13);
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--dur) var(--ease);
+}
+.abp-track:hover {
+  background: var(--bg-hover);
+}
+.abp-track__num {
+  flex: none;
+  width: 24px;
+  font-size: var(--fs-12);
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+.abp-track__title {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.abp-track__dur {
+  flex: none;
+  font-size: var(--fs-12);
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.abp-track--current {
+  background: var(--accent-dim);
+}
+.abp-track--current:hover {
+  background: var(--accent-dim);
+}
+.abp-track--current .abp-track__num,
+.abp-track--current .abp-track__title {
+  color: var(--accent-strong);
+  font-weight: 600;
+}
+
+/* ---------- Empty state ---------- */
+.abp__empty {
+  height: 100%;
+}
+.abp__empty-title {
+  font-size: var(--fs-16);
+  font-weight: 600;
+  color: var(--text-1);
+}
+.abp__empty-sub {
+  max-width: 40ch;
+  font-size: var(--fs-13);
+  line-height: 1.5;
+  color: var(--text-3);
+}
+.abp__empty .btn {
+  margin-top: var(--sp-2);
+}
+
+/* ---------- Narrow windows (app minimum is 940px, but the pane can be
+     narrower inside it) ---------- */
+@media (max-width: 640px) {
+  .abp__inner {
+    padding: var(--sp-5) var(--sp-4) var(--sp-8);
+    gap: var(--sp-4);
+  }
+  .abp__art {
+    width: 200px;
+  }
+  .abp__play {
+    width: 48px;
+    height: 48px;
+  }
+  .abp__tracks-list {
+    max-height: 260px;
+  }
+}

@@ -1,7 +1,7 @@
 import "./style/tokens.css";
 import "./style/base.css";
 import "./style/components.css";
-import { navigate, setNavigator, type Route } from "./core/nav";
+import { itemRoute, navigate, setNavigator, type Route } from "./core/nav";
 import { initSettings, settingsStore } from "./core/session";
 import { initLibrary } from "./core/library";
 import { fileExt } from "./core/format";
@@ -69,6 +69,11 @@ async function go(route: Route): Promise<void> {
     if (token !== navToken) return;
     const view = mountActivity(app);
     dispose = () => view.dispose();
+  } else if (route.view === "audiobook") {
+    const { mountAudiobookPlayer } = await import("./audiobook/player");
+    if (token !== navToken) return;
+    const view = mountAudiobookPlayer(app, route.itemId);
+    dispose = () => view.dispose();
   } else {
     const { mountReader } = await import("./reader/reader");
     if (token !== navToken) return;
@@ -87,6 +92,25 @@ void (async () => {
   await Promise.all([initSettings(), initLibrary()]);
   await go({ view: "library" });
 
+  // The asset scope isn't persisted, so after a restart the webview can't load
+  // any previously imported audio until those paths are allowed again. Fire it
+  // right after the first paint, off the critical path, and swallow everything:
+  // a library with no audiobooks must cost nothing and boot must never break.
+  void (async () => {
+    try {
+      const { libraryStore } = await import("./core/library");
+      const paths: string[] = [];
+      for (const it of libraryStore.get().items) {
+        for (const t of it.audio?.tracks ?? []) if (t.path) paths.push(t.path);
+      }
+      if (paths.length === 0) return;
+      const { ipc: ipcMod } = await import("./core/ipc");
+      await ipcMod.allowAudioPaths(paths);
+    } catch {
+      /* the player reports unplayable tracks itself */
+    }
+  })();
+
   // Resume the last-opened item on launch when enabled.
   if (settingsStore.get().resumeLastItem) {
     const { libraryStore } = await import("./core/library");
@@ -95,7 +119,7 @@ void (async () => {
     for (const it of items) {
       if (it.lastOpenedAt && (!last || it.lastOpenedAt > (last.lastOpenedAt ?? 0))) last = it;
     }
-    if (last) navigate({ view: "reader", itemId: last.id });
+    if (last) navigate(itemRoute(last));
   }
 
   // Tray actions: transport without the window, graceful quit with a flush.
@@ -123,9 +147,14 @@ void (async () => {
   let openChain: Promise<void> = Promise.resolve();
   const routeOpenPath = async (path: string): Promise<void> => {
     if (!IMPORT_EXTENSIONS.has(fileExt(path))) return;
-    const { importFiles } = await import("./core/import");
+    const [{ importFiles }, { getItem }] = await Promise.all([
+      import("./core/import"),
+      import("./core/library"),
+    ]);
     const ids = await importFiles([path]);
-    if (ids.length === 1) navigate({ view: "reader", itemId: ids[0]! });
+    if (ids.length !== 1) return;
+    const imported = getItem(ids[0]!);
+    if (imported) navigate(itemRoute(imported));
   };
   const drainOpenPaths = async (): Promise<void> => {
     try {

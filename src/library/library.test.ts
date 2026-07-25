@@ -5,9 +5,16 @@
 // graph) but exercises only the pure exports.
 
 import { describe, expect, it } from "vitest";
-import { buildChapterSummaries, buildExportChapters, prepareAudioBytes } from "./library";
+import {
+  audiobookSubLine,
+  buildChapterSummaries,
+  buildExportChapters,
+  prepareAudioBytes,
+  timeLeftLabel,
+} from "./library";
 import { resolveExportNumbering } from "../core/ipc";
-import type { ContentDoc } from "../core/types";
+import { itemRoute } from "../core/nav";
+import type { ContentDoc, LibraryItem } from "../core/types";
 
 describe("prepareAudioBytes", () => {
   // 1550 words at 155 wpm = 10 min = 600 s of speech.
@@ -131,5 +138,61 @@ describe("resolveExportNumbering", () => {
     const chapters = [{ title: "a", texts: ["x"], number: 900 }];
     expect(resolveExportNumbering(chapters, 12).totalChapters).toBe(900);
     expect(resolveExportNumbering([], 0).totalChapters).toBe(1);
+  });
+});
+
+describe("audiobook cards", () => {
+  const base: LibraryItem = {
+    id: "a1",
+    title: "Dune",
+    sourceType: "audiobook",
+    addedAt: 0,
+    favorite: false,
+    collections: [],
+    wordCount: 0,
+    chapterCount: 3,
+    reading: { chapter: 0, block: 0, sentence: 0 },
+    playback: { chapter: 0, block: 0, sentence: 0 },
+    progressPct: 0,
+    bookmarks: [],
+    audio: {
+      tracks: [
+        { path: "D:\\A\\1.mp3", title: "One", durationSec: 3600 },
+        { path: "D:\\A\\2.mp3", title: "Two", durationSec: 3600 },
+        { path: "D:\\A\\3.mp3", title: "Three", durationSec: 1800 },
+      ],
+      trackIndex: 0,
+      offsetSec: 0,
+      totalSec: 9000,
+    },
+  };
+
+  it("describes an audiobook by its length and track count", () => {
+    expect(audiobookSubLine(base)).toBe("2 h 30 min · 3 tracks");
+  });
+
+  it("singularizes one track and copes with a book of unknown length", () => {
+    const one = { ...base, audio: { ...base.audio!, tracks: [base.audio!.tracks[0]!], totalSec: 0 } };
+    expect(audiobookSubLine(one)).toBe("1 track");
+  });
+
+  it("still renders when the audio state is missing entirely", () => {
+    const broken: LibraryItem = { ...base, audio: undefined };
+    expect(audiobookSubLine(broken)).toBe("0 tracks");
+    expect(timeLeftLabel(broken)).toBe("under a minute left");
+  });
+
+  it("counts time left in listening time, not reading time", () => {
+    expect(timeLeftLabel({ ...base, progressPct: 0.5 })).toBe("1 h 15 min left");
+    // A text item of the same shape would report nothing left at all.
+    expect(timeLeftLabel({ ...base, sourceType: "epub", progressPct: 0.5 })).toBe(
+      "under a minute left",
+    );
+  });
+
+  it("routes audiobooks to the player and everything else to the reader", () => {
+    expect(itemRoute(base)).toEqual({ view: "audiobook", itemId: "a1" });
+    expect(itemRoute({ ...base, sourceType: "epub" })).toEqual({ view: "reader", itemId: "a1" });
+    expect(itemRoute({ ...base, sourceType: "pdf" })).toEqual({ view: "reader", itemId: "a1" });
   });
 });

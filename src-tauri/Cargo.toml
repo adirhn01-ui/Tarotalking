@@ -1,6 +1,6 @@
 [package]
 name = "tarotalking"
-version = "0.6.2"
+version = "0.6.3"
 description = "Fast, lightweight desktop reading and text-to-speech app"
 edition = "2021"
 license = "GPL-3.0-or-later"
@@ -47,6 +47,10 @@ uuid = { version = "1", features = ["v4"] }
 # local voices (Kokoro/Piper) can be re-encoded to MP3; id3 writes ID3v2 tags.
 mp3lame-encoder = "0.2"
 id3 = "1"
+# Audiobook import: ID3 (mp3/wav), MP4 ilst (m4a/m4b/aac), FLAC and Vorbis
+# comments plus stream duration behind ONE API — replaces the three or four
+# format-specific crates the same coverage would otherwise cost.
+lofty = "0.24"
 
 [profile.release]
 opt-level = "s"

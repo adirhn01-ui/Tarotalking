@@ -222,3 +222,35 @@ const pdfBuf = makePdf([
 const pdfOut = path.join(outDir, "fixture-doc.pdf");
 writeFileSync(pdfOut, pdfBuf);
 console.log("fixture ready:", path.relative(root, pdfOut), `(${pdfBuf.length} bytes)`);
+
+/* ---------------- audiobook fixture: two tiny WAV tracks ---------------- */
+
+/** A valid 16-bit mono PCM WAV holding `seconds` of a quiet sine tone.
+ *  Real audio, not silence, so a player that decodes it has something to play. */
+function makeWav(seconds, rate = 8000, freq = 220) {
+  const frames = Math.max(1, Math.round(seconds * rate));
+  const data = Buffer.alloc(frames * 2);
+  for (let i = 0; i < frames; i++) {
+    const v = Math.round(Math.sin((2 * Math.PI * freq * i) / rate) * 6000);
+    data.writeInt16LE(v, i * 2);
+  }
+  const header = Buffer.alloc(44);
+  header.write("RIFF", 0);
+  header.writeUInt32LE(36 + data.length, 4);
+  header.write("WAVE", 8);
+  header.write("fmt ", 12);
+  header.writeUInt32LE(16, 16);
+  header.writeUInt16LE(1, 20); // PCM
+  header.writeUInt16LE(1, 22); // mono
+  header.writeUInt32LE(rate, 24);
+  header.writeUInt32LE(rate * 2, 28);
+  header.writeUInt16LE(2, 32);
+  header.writeUInt16LE(16, 34);
+  header.write("data", 36);
+  header.writeUInt32LE(data.length, 40);
+  return Buffer.concat([header, data]);
+}
+
+for (const [name, secs] of [["fixture-track-01.wav", 1.5], ["fixture-track-02.wav", 1.0]]) {
+  writeFileSync(path.join(outDir, name), makeWav(secs));
+}

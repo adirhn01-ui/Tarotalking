@@ -135,6 +135,26 @@ export interface ExportAudiobookResult {
   chaptersWritten: number;
 }
 
+
+/** One audio file's metadata, read from its tags. */
+export interface AudioFileInfo {
+  path: string;
+  title: string;
+  durationSec: number;
+  /** Track number from tags, when present — used to order multi-file books. */
+  trackNo: number | null;
+}
+
+export interface AudiobookImportResult {
+  /** Album/book title from tags, else the folder or file name. */
+  title: string;
+  author: string | null;
+  /** Absolute path of the cover extracted into the item dir, if any art existed. */
+  coverPath: string | null;
+  /** Files in play order. */
+  tracks: AudioFileInfo[];
+}
+
 /* ================= commands ================= */
 
 export const ipc = {
@@ -158,6 +178,13 @@ export const ipc = {
     const buf = await call<ArrayBuffer>("read_file_bytes", { path });
     return new Uint8Array(buf);
   },
+  /** Read tags/durations for audio files and extract cover art into the item's
+   *  dir. Also allows these exact paths into the asset scope so the webview can
+   *  play them; nothing is copied (audiobooks are gigabytes). */
+  importAudiobook: (id: string, paths: string[]): Promise<AudiobookImportResult> =>
+    call("import_audiobook", { id, paths }),
+  /** Re-allow known audiobook paths into the asset scope after a restart. */
+  allowAudioPaths: (paths: string[]): Promise<void> => call("allow_audio_paths", { paths }),
   /** Fetch a web page over HTTP(S) in Rust (frontend has no network). */
   fetchUrl: (url: string): Promise<FetchedPage> => call("fetch_url", { url }),
   /** Persist the parsed ContentDoc JSON for an item. */

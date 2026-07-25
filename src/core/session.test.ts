@@ -52,6 +52,20 @@ describe("sanitizeSettings", () => {
     expect(sanitizeSettings({ playback: { voice: "aria" } }).playback.voice).toBeNull();
   });
 
+  it("defaults the audiobook skip amount to 5 seconds", () => {
+    expect(sanitizeSettings({}).audioSkipSeconds).toBe(5);
+    expect(sanitizeSettings(null).audioSkipSeconds).toBe(5);
+  });
+
+  it("keeps the offered skip amounts and rejects everything else", () => {
+    for (const n of [5, 10, 15, 30]) {
+      expect(sanitizeSettings({ audioSkipSeconds: n }).audioSkipSeconds).toBe(n);
+    }
+    for (const bad of [0, -10, 7, 45, 3600, "10", null, {}, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(sanitizeSettings({ audioSkipSeconds: bad }).audioSkipSeconds).toBe(5);
+    }
+  });
+
   it("merges shortcuts over defaults, ignoring unknown actions", () => {
     const s = sanitizeSettings({ shortcuts: { playPause: "P", bogusAction: "X" } });
     expect(s.shortcuts.playPause).toBe("P");

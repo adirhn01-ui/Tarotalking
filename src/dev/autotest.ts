@@ -282,6 +282,56 @@ export async function runAutotest(): Promise<void> {
       );
     });
 
+    await test("audiobook", async () => {
+      const { audiobook, audiobookState } = await import("../player/audiobook");
+      const tracks = [
+        `${info.fixturesDir}\\fixture-track-01.wav`,
+        `${info.fixturesDir}\\fixture-track-02.wav`,
+      ];
+
+      // Both files share a folder, so they must import as ONE book of 2 tracks.
+      const before = libraryStore.get().items.length;
+      const ids = await importFiles(tracks);
+      assert(ids.length === 1, `expected 1 audiobook item, got ${ids.length}`);
+      const id = ids[0]!;
+      createdItemIds.push(id);
+      await waitFor(() => libraryStore.get().items.length === before + 1, 4000, "audiobook item");
+
+      const item = getItem(id);
+      assert(item, "audiobook missing from library index");
+      assert(item.sourceType === "audiobook", `sourceType: ${item.sourceType}`);
+      assert(item.audio, "item has no audio state");
+      assert(item.audio.tracks.length === 2, `tracks: ${item.audio.tracks.length}`);
+      assert(item.audio.totalSec > 1, `totalSec: ${item.audio.totalSec}`);
+
+      // The player screen must actually mount and render this book.
+      navigate({ view: "audiobook", itemId: id });
+      await waitFor(
+        () => (document.body.textContent ?? "").includes(item.title),
+        6000,
+        "audiobook player showing the title",
+      );
+
+      // The real proof: audio decodes and plays. This fails if the imported
+      // file was never allowed into the asset scope.
+      audiobook.load(item);
+      await audiobook.play();
+      await waitFor(
+        () => audiobookState.get().status === "playing" && audiobookState.get().positionSec > 0.05,
+        10000,
+        `playback to start (status=${audiobookState.get().status} err=${audiobookState.get().error ?? "-"})`,
+      );
+      const moved = audiobookState.get().positionSec;
+
+      // Skipping past the end of track 1 must roll into track 2.
+      audiobook.goToTrack(1);
+      await waitFor(() => audiobookState.get().trackIndex === 1, 5000, "track change");
+
+      audiobook.stop();
+      navigate({ view: "library" });
+      return `played to ${moved.toFixed(2)}s, 2 tracks`;
+    });
+
     await test("activity-page", async () => {
       assert(epubId, "no epub imported");
       const { enqueue, cancelJob, jobsStore, clearFinished } = await import("../core/jobs");
