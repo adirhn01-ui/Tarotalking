@@ -14,6 +14,16 @@ Tarotalking is the reading-and-listening sibling of [Taroting](https://github.co
 
 ## Highlights
 
+**Bring your own audiobooks**
+- Import audio you already own — a single `.m4b`, or a folder of per-chapter
+  files that becomes one book with tracks (mp3, m4a, m4b, aac, flac, ogg, opus,
+  wav). Including audiobooks Tarotalking exported for you.
+- A dedicated player: cover art, scrubbable timeline, skip back/forward,
+  previous/next track, track list, speed, sleep timer, and resume exactly where
+  you stopped — plus lock-screen and media-key control.
+- Your files stay where they are. Nothing is copied into the app; only cover art
+  is extracted.
+
 **Import anything readable**
 - EPUB (chapters, images, cover art), PDF (uses the document outline for chapters when present; scanned/image-only PDFs are detected and refused with a clear message rather than importing blank pages), Markdown, plain text, pasted text, and web articles (Firefox Reader Mode extraction via Readability)
 - Every source normalizes into one clean content model, so every book and article gets the same calm typography — raw source HTML never touches the app's DOM
