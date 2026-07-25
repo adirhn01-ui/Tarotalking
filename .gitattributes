@@ -1,0 +1,17 @@
+# Keep binary assets byte-identical through clone/checkout — without this a
+# file git heuristically reads as text (a mostly-ASCII PDF, for instance) gets
+# line-ending conversion applied and comes back corrupt.
+*.pdf binary
+*.epub binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.ico binary
+*.icns binary
+*.onnx binary
+*.wav binary
+*.mp3 binary
+*.exe binary
+*.bz2 binary
+*.gz binary
+*.zip binary
