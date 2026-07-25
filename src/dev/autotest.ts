@@ -36,6 +36,18 @@ async function waitFor(cond: () => boolean, timeoutMs: number, what: string): Pr
   }
 }
 
+
+/** waitFor that reports failure instead of throwing — for checks that are
+ *  meaningful when the environment allows them and skippable when it does not. */
+async function settles(cond: () => boolean, timeoutMs: number): Promise<boolean> {
+  const start = Date.now();
+  while (!cond()) {
+    if (Date.now() - start > timeoutMs) return false;
+    await sleep(60);
+  }
+  return true;
+}
+
 async function test(name: string, fn: () => Promise<string | void>): Promise<void> {
   try {
     const note = await fn();
@@ -374,9 +386,32 @@ export async function runAutotest(): Promise<void> {
         `TTS to stop when the audiobook starts (was ${engineState.get().status})`,
       );
 
+      // And the home-screen bar must name what is AUDIBLE, not a player left
+      // paused by the hand-off. Sustained TTS needs the asset protocol, which
+      // this harness sometimes sandboxes (see system-voice-playback), so the
+      // bar check runs only when read-aloud actually keeps playing here. The
+      // precedence rule itself is pinned by unit tests either way.
+      audiobook.pause();
+      await engine.play();
+      let barNote = "bar check skipped: read-aloud could not sustain playback here";
+      const ttsLive = await settles(
+        () => engineState.get().status === "playing",
+        4000,
+      );
+      if (ttsLive) {
+        navigate({ view: "library" });
+        await waitFor(() => !!document.querySelector(".mini-player"), 6000, "mini-player visible");
+        const barText = document.querySelector(".mini-player")?.textContent ?? "";
+        assert(
+          barText.includes("The Fixture Book"),
+          `bar should name the audible read-aloud, got: ${barText.slice(0, 80)}`,
+        );
+        barNote = "bar follows the audible one";
+      }
+
       audiobook.stop();
       engine.stop();
-      return "both directions silenced";
+      return `both directions silenced; ${barNote}`;
     });
 
     await test("audiobook-survives-navigation", async () => {

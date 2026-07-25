@@ -195,3 +195,54 @@ describe("nowPlaying — the progress hairline", () => {
     expect(nowPlaying(IDLE_TTS, book({ positionSec: 10, durationSec: 0 }), lookup)?.pct).toBe(0);
   });
 });
+
+describe("nowPlaying — the bar follows the audio you can hear", () => {
+  // The reported bug: listen to an audiobook, then play a book aloud. Starting
+  // one player pauses the other, so BOTH are bound — and the bar showed the
+  // paused audiobook while the read-aloud was audible. Dismissing it revealed
+  // the right one, which is what gave the game away.
+  it("prefers the playing read-aloud over a merely paused audiobook", () => {
+    const np = nowPlaying(
+      tts({ status: "playing", itemId: "book-1" }),
+      book({ status: "paused", itemId: "book-2" }),
+      lookupAll,
+      "tts",
+    );
+    expect(np?.kind).toBe("tts");
+    expect(np?.playing).toBe(true);
+  });
+
+  it("prefers the playing audiobook over a merely paused read-aloud", () => {
+    const np = nowPlaying(
+      tts({ status: "paused", itemId: "book-1" }),
+      book({ status: "playing", itemId: "book-2" }),
+      lookupAll,
+      "audiobook",
+    );
+    expect(np?.kind).toBe("audiobook");
+    expect(np?.playing).toBe(true);
+  });
+
+  it("treats loading as audible, so a starting track still wins", () => {
+    const np = nowPlaying(
+      tts({ status: "paused" }),
+      book({ status: "loading" }),
+      lookupAll,
+      "audiobook",
+    );
+    expect(np?.kind).toBe("audiobook");
+  });
+
+  it("with both paused, names whichever last held the output", () => {
+    const bothPaused = [tts({ status: "paused" }), book({ status: "paused" })] as const;
+    expect(nowPlaying(bothPaused[0], bothPaused[1], lookupAll, "tts")?.kind).toBe("tts");
+    expect(nowPlaying(bothPaused[0], bothPaused[1], lookupAll, "audiobook")?.kind).toBe(
+      "audiobook",
+    );
+  });
+
+  it("falls back without an owner rather than returning nothing", () => {
+    const np = nowPlaying(tts({ status: "paused" }), book({ status: "paused" }), lookupAll, null);
+    expect(np).not.toBeNull();
+  });
+});

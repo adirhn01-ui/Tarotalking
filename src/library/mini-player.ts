@@ -14,6 +14,7 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { escapeHtml } from "../core/format";
 import { getItem } from "../core/library";
+import { playbackOwner, type PlaybackOwner } from "../player/audio-lock";
 import { itemRoute, navigate } from "../core/nav";
 import { settingsStore } from "../core/session";
 import type { LibraryItem, PlaybackStatus, SourceType } from "../core/types";
@@ -112,34 +113,53 @@ export function nowPlaying(
   tts: TtsPlayback,
   book: AudiobookPlayback,
   lookup: (id: string) => LibraryItem | undefined,
+  owner: PlaybackOwner | null = null,
 ): NowPlaying | null {
-  if (book.itemId && isBound(book.status)) {
-    const item = lookup(book.itemId);
-    if (item) {
-      return {
-        kind: "audiobook",
-        itemId: item.id,
-        title: item.title,
-        sub: audiobookSub(item, book.trackIndex, book.status),
-        playing: book.status === "playing" || book.status === "loading",
-        pct: audiobookPct(item, book),
-      };
-    }
-  }
-  if (tts.itemId && isBound(tts.status)) {
-    const item = lookup(tts.itemId);
-    if (item) {
-      return {
-        kind: "tts",
-        itemId: item.id,
-        title: item.title,
-        sub: (item.chapterLabel && item.chapterLabel.trim()) || statusWord(tts.status),
-        playing: tts.status === "playing" || tts.status === "loading",
-        pct: clamp01(tts.pct),
-      };
-    }
-  }
-  return null;
+  const bookSnap =
+    book.itemId && isBound(book.status)
+      ? (() => {
+          const item = lookup(book.itemId!);
+          if (!item) return null;
+          return {
+            kind: "audiobook" as const,
+            itemId: item.id,
+            title: item.title,
+            sub: audiobookSub(item, book.trackIndex, book.status),
+            playing: book.status === "playing" || book.status === "loading",
+            pct: audiobookPct(item, book),
+          };
+        })()
+      : null;
+
+  const ttsSnap =
+    tts.itemId && isBound(tts.status)
+      ? (() => {
+          const item = lookup(tts.itemId!);
+          if (!item) return null;
+          return {
+            kind: "tts" as const,
+            itemId: item.id,
+            title: item.title,
+            sub: (item.chapterLabel && item.chapterLabel.trim()) || statusWord(tts.status),
+            playing: tts.status === "playing" || tts.status === "loading",
+            pct: clamp01(tts.pct),
+          };
+        })()
+      : null;
+
+  if (!bookSnap) return ttsSnap;
+  if (!ttsSnap) return bookSnap;
+
+  // Both are bound — one is almost always merely PAUSED, because starting
+  // either player pauses the other. Showing the paused one is the bug this
+  // ordering exists to prevent: the bar must follow the audio you can hear.
+  if (bookSnap.playing !== ttsSnap.playing) return bookSnap.playing ? bookSnap : ttsSnap;
+
+  // Neither is playing (both paused): follow whoever last held the output, so
+  // the bar names the book you were last listening to rather than a fixed kind.
+  if (owner === "tts") return ttsSnap;
+  if (owner === "audiobook") return bookSnap;
+  return bookSnap;
 }
 
 /* ================= the bar ================= */
@@ -256,7 +276,7 @@ export function mountMiniPlayer(container: HTMLElement): MiniPlayer {
   }
 
   function sync(): void {
-    const np = nowPlaying(engineState.get(), audiobookState.get(), getItem);
+    const np = nowPlaying(engineState.get(), audiobookState.get(), getItem, playbackOwner());
     if (!np || !settingsStore.get().miniPlayer) {
       current = null;
       currentItem = null;
