@@ -427,7 +427,11 @@ export function mountAudiobookPlayer(el: HTMLElement, itemId: string): Audiobook
   return {
     dispose() {
       // Playback deliberately outlives the view — leaving the screen does not
-      // stop the book, exactly as it does not stop a read-aloud.
+      // stop the book, exactly as it does not stop a read-aloud. The one
+      // exception is the documented miniPlayer contract: with the bar turned
+      // off there is nowhere to control a book you have walked away from, so
+      // leaving pauses it, matching the reader.
+      if (!settingsStore.get().miniPlayer) audiobook.pause();
       unsubState();
       unsubSleep();
       unsubSkip();

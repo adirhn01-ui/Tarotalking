@@ -27,6 +27,7 @@ import type {
   WordBoundary,
 } from "../core/types";
 import { getProvider, type SpeakHandle } from "./providers/provider";
+import { claimPlayback, registerPlayer, releasePlayback } from "./audio-lock";
 
 export interface EngineState {
   status: PlaybackStatus;
@@ -763,6 +764,8 @@ export const engine = {
     if (!doc) return;
     const st = engineState.get().status;
     if (st === "playing" || st === "loading") return;
+    // Silence anything else first — only one source is ever audible.
+    claimPlayback("tts");
     // Rewind on resume: after a long pause, re-enter a sentence or two back so
     // the listener lands mid-thought instead of mid-sentence.
     const steps =
@@ -826,6 +829,7 @@ export const engine = {
     gen++;
     cancelCurrentAudio();
     endFade();
+    releasePlayback("tts");
     pausedAt = null;
     if (audio) audio.removeAttribute("src");
     patchState({ status: "idle" });
@@ -926,3 +930,9 @@ export const engine = {
     endFade(); // cancelling mid-fade brings the volume straight back up
   },
 };
+
+// Let the arbiter silence this player when something else starts.
+registerPlayer("tts", () => {
+  const st = engineState.get().status;
+  if (st === "playing" || st === "loading") engine.pause();
+});

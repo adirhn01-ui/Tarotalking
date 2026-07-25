@@ -61,6 +61,7 @@ export async function runAutotest(): Promise<void> {
   const info = await ipc.debugInfo();
   const fixtureEpub = `${info.fixturesDir}\\fixture-book.epub`;
   let epubId: string | null = null;
+  let audiobookItemId: string | null = null;
 
   try {
     await test("import-epub", async () => {
@@ -295,6 +296,7 @@ export async function runAutotest(): Promise<void> {
       assert(ids.length === 1, `expected 1 audiobook item, got ${ids.length}`);
       const id = ids[0]!;
       createdItemIds.push(id);
+      audiobookItemId = id;
       await waitFor(() => libraryStore.get().items.length === before + 1, 4000, "audiobook item");
 
       const item = getItem(id);
@@ -330,6 +332,99 @@ export async function runAutotest(): Promise<void> {
       audiobook.stop();
       navigate({ view: "library" });
       return `played to ${moved.toFixed(2)}s, 2 tracks`;
+    });
+
+    await test("playback-exclusivity", async () => {
+      // Two independent players share one pair of speakers. Starting either
+      // must silence the other, in BOTH directions — the reported bug was
+      // read-aloud starting over a playing audiobook.
+      assert(epubId, "no epub imported");
+      const { audiobook, audiobookState } = await import("../player/audiobook");
+      const id = audiobookItemId;
+      assert(id, "no audiobook imported");
+
+      const book = getItem(id)!;
+      audiobook.load(book);
+      await audiobook.play();
+      await waitFor(
+        () => audiobookState.get().status === "playing",
+        8000,
+        "audiobook playing",
+      );
+
+      // Read-aloud starts -> the audiobook must go quiet.
+      const doc = await loadDoc(epubId);
+      engine.load(epubId, doc, { chapter: 0, block: 0, sentence: 0 });
+      await engine.play();
+      await waitFor(
+        () => audiobookState.get().status !== "playing",
+        8000,
+        `audiobook to stop when TTS starts (was ${audiobookState.get().status})`,
+      );
+      assert(
+        audiobookState.get().status !== "loading",
+        "audiobook still starting up while TTS plays",
+      );
+
+      // And the other way: the audiobook starts -> read-aloud must go quiet.
+      await audiobook.play();
+      await waitFor(
+        () => engineState.get().status !== "playing" && engineState.get().status !== "loading",
+        8000,
+        `TTS to stop when the audiobook starts (was ${engineState.get().status})`,
+      );
+
+      audiobook.stop();
+      engine.stop();
+      return "both directions silenced";
+    });
+
+    await test("audiobook-survives-navigation", async () => {
+      // Leaving the player screen must not pause the book, and returning must
+      // not restart or rewind it.
+      const { audiobook, audiobookState } = await import("../player/audiobook");
+      const id = audiobookItemId;
+      assert(id, "no audiobook imported");
+
+      audiobook.load(getItem(id)!);
+      await audiobook.play();
+      await waitFor(() => audiobookState.get().status === "playing", 8000, "playing");
+
+      navigate({ view: "library" });
+      await waitFor(() => !!document.querySelector(".lib"), 6000, "library mounted");
+      const atHome = audiobookState.get();
+      assert(
+        atHome.status === "playing",
+        `leaving the player paused the book (status=${atHome.status})`,
+      );
+
+      const before = atHome.positionSec;
+      await sleep(700);
+      assert(
+        audiobookState.get().positionSec > before,
+        "position did not advance while on the library screen",
+      );
+
+      navigate({ view: "audiobook", itemId: id });
+      await waitFor(() => !!document.querySelector(".abp"), 6000, "player remounted");
+      const back = audiobookState.get();
+      assert(back.status === "playing", `returning paused the book (status=${back.status})`);
+      assert(
+        back.positionSec >= before,
+        `returning rewound the book (${back.positionSec} < ${before})`,
+      );
+
+      // The library index must carry the progress, not just the live store.
+      audiobook.pause();
+      await waitFor(
+        () => (getItem(id)!.audio?.offsetSec ?? 0) > 0,
+        4000,
+        "progress persisted to the library index",
+      );
+
+      audiobook.stop();
+      navigate({ view: "library" });
+      return `kept playing across navigation, resumed at ${back.positionSec.toFixed(2)}s`;
     });
 
     await test("activity-page", async () => {

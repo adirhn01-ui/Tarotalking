@@ -22,6 +22,7 @@ import { DEFAULT_AUDIO_SKIP, settingsStore, updatePlaybackPrefs } from "../core/
 import { Store, subscribeSelect } from "../core/store";
 import type { AudioState, AudioTrack, LibraryItem, PlaybackStatus } from "../core/types";
 import { engine, fadedVolume, SLEEP_FADE_MS, sleepFadeGain } from "./engine";
+import { claimPlayback, registerPlayer, releasePlayback } from "./audio-lock";
 
 export interface AudiobookState {
   status: PlaybackStatus;
@@ -611,8 +612,9 @@ export const audiobook = {
     if (tracks.length === 0) return;
     const st = audiobookState.get();
     if (st.status === "playing" || st.status === "loading") return;
-    // One thing speaks at a time: starting a book stops the reading engine.
-    engine.stop();
+    // One thing is ever audible — the arbiter silences whatever else holds
+    // the output, whichever player that happens to be.
+    claimPlayback("audiobook");
     claimMediaSession();
 
     // Mid-track resume: the element still holds this track's decoded stream.
@@ -660,6 +662,7 @@ export const audiobook = {
     flushPersist();
     teardownAudio();
     releaseMediaSession();
+    releasePlayback("audiobook");
     patch({ status: "idle" });
     reportPlaying(false);
   },
@@ -758,3 +761,9 @@ export const audiobook = {
     endFade(); // cancelling mid-fade brings the volume straight back up
   },
 };
+
+// Let the arbiter silence this player when something else starts.
+registerPlayer("audiobook", () => {
+  const st = audiobookState.get();
+  if (st.status === "playing" || st.status === "loading") audiobook.pause();
+});
